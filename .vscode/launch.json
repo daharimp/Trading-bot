@@ -1,0 +1,20 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "type": "java",
+            "name": "Main",
+            "request": "launch",
+            "mainClass": "Main",
+            "projectName": "trading-bot"
+        },
+        {
+            "type": "java",
+            "name": "Trading Bot",
+            "request": "launch",
+            "mainClass": "com.tradingbot.Main",
+            "projectName": "trading-bot",
+            "envFile": "${workspaceFolder}/src/com/tradingbot/.env"
+        }
+    ]
+}
