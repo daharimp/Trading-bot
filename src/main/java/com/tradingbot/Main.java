@@ -1,10 +1,15 @@
 package com.tradingbot;
 
 import com.tradingbot.alpaca.AlpacaClient;
+import com.tradingbot.analysis.AnalysisService;
 import com.tradingbot.analysis.FundamentalAnalyst;
 import com.tradingbot.analysis.TechnicalAnalyst;
+import com.tradingbot.chart.ChartRenderer;
 import com.tradingbot.discord.DiscordListener;
+import com.tradingbot.discord.DiscordNotifier;
 import com.tradingbot.fundamental.FundamentalDataClient;
+import com.tradingbot.order.OrderManager;
+import com.tradingbot.scheduler.WatchlistScheduler;
 import discord4j.core.DiscordClient;
 import discord4j.core.GatewayDiscordClient;
 import discord4j.core.event.domain.message.MessageCreateEvent;
@@ -19,24 +24,28 @@ public class Main {
     public static void main(String[] args) {
         Dotenv env = Dotenv.configure().ignoreIfMissing().load();
 
-        String discordToken  = requireEnv(env, "DISCORD_BOT_TOKEN");
-        String alpacaKey     = requireEnv(env, "ALPACA_API_KEY");
-        String alpacaSecret  = requireEnv(env, "ALPACA_API_SECRET");
-        String openAiKey     = requireEnv(env, "OPENAI_API_KEY");
-        String alpacaMode    = env.get("ALPACA_MODE", "paper");
-        String channelName   = env.get("DISCORD_CHANNEL_NAME", "");
-
+        String discordToken     = requireEnv(env, "DISCORD_BOT_TOKEN");
+        String alpacaKey        = requireEnv(env, "ALPACA_API_KEY");
+        String alpacaSecret     = requireEnv(env, "ALPACA_API_SECRET");
+        String openAiKey        = requireEnv(env, "OPENAI_API_KEY");
         String alphaVantageKey  = requireEnv(env, "ALPHA_VANTAGE_API_KEY");
         String openRouterKey    = requireEnv(env, "OPENROUTER_API_KEY");
+
+        String alpacaMode       = env.get("ALPACA_MODE", "paper");
+        String channelName      = env.get("DISCORD_CHANNEL_NAME", "");
         String fundamentalModel = env.get("FUNDAMENTAL_LLM_MODEL", "google/gemini-flash-1.5");
+        String scheduleTime     = env.get("ANALYSIS_SCHEDULE_TIME", "23:00");
 
-        AlpacaClient alpaca              = new AlpacaClient(alpacaKey, alpacaSecret, alpacaMode);
-        FundamentalDataClient fdClient   = new FundamentalDataClient(alphaVantageKey);
-        TechnicalAnalyst techAnalyst     = new TechnicalAnalyst(openAiKey);
-        FundamentalAnalyst fundAnalyst   = new FundamentalAnalyst(openRouterKey, fundamentalModel);
-        DiscordListener listener         = new DiscordListener(alpaca, fdClient, techAnalyst, fundAnalyst, channelName);
+        AlpacaClient alpaca           = new AlpacaClient(alpacaKey, alpacaSecret, alpacaMode);
+        FundamentalDataClient fdClient = new FundamentalDataClient(alphaVantageKey);
+        TechnicalAnalyst techAnalyst  = new TechnicalAnalyst(openAiKey);
+        FundamentalAnalyst fundAnalyst = new FundamentalAnalyst(openRouterKey, fundamentalModel);
+        AnalysisService analysisService = new AnalysisService(alpaca, techAnalyst, fundAnalyst, fdClient);
+        OrderManager orderManager     = new OrderManager(alpaca);
+        ChartRenderer chartRenderer   = new ChartRenderer();
 
-        log.info("Starting Trading Bot (Alpaca: {} | Technical: GPT-4o | Fundamental: {})", alpacaMode, fundamentalModel);
+        log.info("Starting Trading Bot (Alpaca: {} | Technical: GPT-4o | Fundamental: {} | Schedule: {}ET)",
+                alpacaMode, fundamentalModel, scheduleTime);
 
         GatewayDiscordClient gateway = DiscordClient.create(discordToken)
                 .login()
@@ -47,10 +56,19 @@ public class Main {
             System.exit(1);
         }
 
+        DiscordNotifier notifier = new DiscordNotifier(gateway, channelName);
+        WatchlistScheduler scheduler = new WatchlistScheduler(notifier, analysisService, scheduleTime);
+        scheduler.start();
+
+        DiscordListener listener = new DiscordListener(
+                analysisService, orderManager, scheduler, chartRenderer, channelName);
+
         gateway.on(MessageCreateEvent.class, listener::handle).subscribe();
 
-        log.info("Bot online. Send a ticker (e.g. AAPL) in #{}", channelName);
+        log.info("Bot online in #{} | Commands: !analyze !watch !play !positions !help", channelName);
         gateway.onDisconnect().block();
+
+        scheduler.shutdown();
     }
 
     private static String requireEnv(Dotenv env, String key) {
