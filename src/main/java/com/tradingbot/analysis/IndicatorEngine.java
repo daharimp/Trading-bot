@@ -131,4 +131,9 @@ public class IndicatorEngine {
     public int barCount() {
         return series.getBarCount();
     }
+
+    // Per-index accessors used by ChartRenderer to build full series arrays
+    public double ema9AtIndex(int i)  { return ema9.getValue(i).doubleValue(); }
+    public double ema21AtIndex(int i) { return ema21.getValue(i).doubleValue(); }
+    public double ema50AtIndex(int i) { return ema50.getValue(i).doubleValue(); }
 }
