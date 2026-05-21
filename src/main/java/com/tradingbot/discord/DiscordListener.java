@@ -3,6 +3,7 @@ package com.tradingbot.discord;
 import com.tradingbot.alpaca.AlpacaClient;
 import com.tradingbot.analysis.AnalysisService;
 import com.tradingbot.chart.ChartRenderer;
+import com.tradingbot.model.TradeIdea;
 import com.tradingbot.order.OrderManager;
 import com.tradingbot.scheduler.WatchlistScheduler;
 import discord4j.core.event.domain.message.MessageCreateEvent;
@@ -28,15 +29,17 @@ public class DiscordListener {
     private final OrderManager orderManager;
     private final WatchlistScheduler scheduler;
     private final ChartRenderer chartRenderer;
+    private final SessionStore sessionStore;
     private final String watchedChannel;
 
     public DiscordListener(AnalysisService analysisService, OrderManager orderManager,
                            WatchlistScheduler scheduler, ChartRenderer chartRenderer,
-                           String watchedChannel) {
+                           SessionStore sessionStore, String watchedChannel) {
         this.analysisService = analysisService;
         this.orderManager    = orderManager;
         this.scheduler       = scheduler;
         this.chartRenderer   = chartRenderer;
+        this.sessionStore    = sessionStore;
         this.watchedChannel  = watchedChannel;
     }
 
@@ -48,31 +51,50 @@ public class DiscordListener {
 
         return message.getChannel()
                 .filter(ch -> channelMatches(ch, watchedChannel))
-                .flatMap(ch -> route(content, ch, message))
+                .flatMap(ch -> route(content, ch))
                 .then();
     }
 
-    private Mono<?> route(String content, MessageChannel ch, Message message) {
+    private Mono<?> route(String content, MessageChannel ch) {
 
-        // !ANALYZE AAPL  or  !ANALYZE BTC/USD
+        // ── !ANALYZE ────────────────────────────────────────────────────────────
         if (content.startsWith("!ANALYZE ")) {
             String ticker = content.substring("!ANALYZE ".length()).trim();
             if (!ticker.matches("[A-Z0-9/]{1,10}")) {
-                return ch.createMessage("❌ Invalid ticker `" + ticker + "`. Example: `!analyze AAPL` or `!analyze BTC/USD`");
+                return ch.createMessage("❌ Invalid ticker `" + ticker
+                        + "`. Example: `!analyze AAPL` or `!analyze BTC/USD`");
             }
-            return ch.createMessage("🔍 Analyzing **" + ticker + "** — technical + fundamental running in parallel...")
+            return ch.createMessage("🔍 Analyzing **" + ticker
+                    + "** — technical + fundamental running in parallel...")
                     .flatMap(status ->
                         Mono.fromCallable(() -> runAnalysisWithChart(ticker))
                             .subscribeOn(Schedulers.boundedElastic())
                             .flatMap(result -> {
-                                if (result.chartPng != null) {
-                                    return status.getChannel().flatMap(c -> c.createMessage(
+                                // Store setups for !pick
+                                String channelId = ch.getId().asString();
+                                sessionStore.store(channelId, result.analysisResult().ideas());
+
+                                // Send analysis + chart
+                                Mono<?> analysisMsg;
+                                if (result.chartPng() != null) {
+                                    analysisMsg = status.getChannel().flatMap(c -> c.createMessage(
                                             MessageCreateSpec.builder()
-                                                    .content(result.text)
-                                                    .addFile("chart.png", new ByteArrayInputStream(result.chartPng))
+                                                    .content(result.analysisResult().text())
+                                                    .addFile("chart.png",
+                                                            new ByteArrayInputStream(result.chartPng()))
                                                     .build()));
+                                } else {
+                                    analysisMsg = status.getChannel()
+                                            .flatMap(c -> c.createMessage(result.analysisResult().text()));
                                 }
-                                return status.getChannel().flatMap(c -> c.createMessage(result.text));
+
+                                // Send pick menu as a second message if there are setups
+                                String pickMenu = analysisService.buildPickMenu(
+                                        result.analysisResult().ideas());
+                                if (!pickMenu.isEmpty()) {
+                                    return analysisMsg.then(ch.createMessage(pickMenu));
+                                }
+                                return analysisMsg;
                             })
                     )
                     .onErrorResume(e -> {
@@ -81,15 +103,27 @@ public class DiscordListener {
                     });
         }
 
-        // !WATCH AAPL TSLA BTC/USD
-        if (content.startsWith("!WATCH ")) {
-            String[] tickers = content.substring("!WATCH ".length()).trim().split("\\s+");
-            for (String t : tickers) scheduler.addTicker(t);
-            return ch.createMessage("📋 Added to watchlist: **" + String.join(", ", tickers) + "**\n"
-                    + "Current watchlist: " + String.join(", ", scheduler.getWatchlist()));
+        // ── !PICK N QTY=X ───────────────────────────────────────────────────────
+        if (content.startsWith("!PICK ")) {
+            return Mono.fromCallable(() -> handlePick(content, ch.getId().asString()))
+                    .subscribeOn(Schedulers.boundedElastic())
+                    .flatMap(ch::createMessage)
+                    .onErrorResume(e -> ch.createMessage("❌ Pick failed: " + e.getMessage()));
         }
 
-        // !UNWATCH AAPL
+        // ── !WATCH AAPL [auto] ──────────────────────────────────────────────────
+        if (content.startsWith("!WATCH ")) {
+            String[] parts = content.substring("!WATCH ".length()).trim().split("\\s+");
+            boolean autoPlay = parts.length > 0 && parts[parts.length - 1].equals("AUTO");
+            int tickerCount = autoPlay ? parts.length - 1 : parts.length;
+            for (int i = 0; i < tickerCount; i++) scheduler.addTicker(parts[i], autoPlay);
+            String added = String.join(", ", java.util.Arrays.copyOf(parts, tickerCount));
+            return ch.createMessage("📋 Added to watchlist: **" + added + "**"
+                    + (autoPlay ? " *(auto-play HIGH setups overnight)*" : "")
+                    + "\nCurrent watchlist: " + String.join(", ", scheduler.getWatchlist()));
+        }
+
+        // ── !UNWATCH ────────────────────────────────────────────────────────────
         if (content.startsWith("!UNWATCH ")) {
             String ticker = content.substring("!UNWATCH ".length()).trim();
             scheduler.removeTicker(ticker);
@@ -98,24 +132,25 @@ public class DiscordListener {
             return ch.createMessage("✅ Removed **" + ticker + "** from watchlist.\nCurrent: " + list);
         }
 
-        // !WATCHLIST
+        // ── !WATCHLIST ──────────────────────────────────────────────────────────
         if (content.equals("!WATCHLIST")) {
             List<String> list = scheduler.getWatchlist();
-            if (list.isEmpty()) return ch.createMessage("📋 Watchlist is empty. Add tickers with `!watch AAPL TSLA`");
+            if (list.isEmpty())
+                return ch.createMessage("📋 Watchlist is empty. Add tickers with `!watch AAPL TSLA`");
             return ch.createMessage("📋 **Watchlist:** " + String.join(", ", list)
-                    + "\nOvernight analysis runs at the configured schedule. Use `!runanalysis` to trigger now.");
+                    + "\n*(auto) = HIGH conviction setups placed automatically overnight*"
+                    + "\nUse `!runanalysis` to trigger now.");
         }
 
-        // !RUNANALYSIS — trigger now
+        // ── !RUNANALYSIS ────────────────────────────────────────────────────────
         if (content.equals("!RUNANALYSIS")) {
-            if (scheduler.getWatchlist().isEmpty()) {
+            if (scheduler.isEmpty())
                 return ch.createMessage("📋 Watchlist is empty. Add tickers first with `!watch AAPL TSLA`");
-            }
             scheduler.runNow();
             return ch.createMessage("🚀 Overnight analysis triggered — results will be posted shortly.");
         }
 
-        // !PLAY AAPL LONG E=182.50 S=179 T=189 QTY=10
+        // ── !PLAY (manual bracket order) ────────────────────────────────────────
         if (content.startsWith("!PLAY ")) {
             return Mono.fromCallable(() -> parseAndPlaceOrder(content))
                     .subscribeOn(Schedulers.boundedElastic())
@@ -123,7 +158,7 @@ public class DiscordListener {
                     .onErrorResume(e -> ch.createMessage("❌ Order failed: " + e.getMessage()));
         }
 
-        // !POSITIONS
+        // ── !POSITIONS ──────────────────────────────────────────────────────────
         if (content.equals("!POSITIONS")) {
             return Mono.fromCallable(orderManager::listPositions)
                     .subscribeOn(Schedulers.boundedElastic())
@@ -131,7 +166,7 @@ public class DiscordListener {
                     .onErrorResume(e -> ch.createMessage("❌ Could not fetch positions: " + e.getMessage()));
         }
 
-        // !CANCEL ORDER_ID
+        // ── !CANCEL ─────────────────────────────────────────────────────────────
         if (content.startsWith("!CANCEL ")) {
             String orderId = content.substring("!CANCEL ".length()).trim();
             return Mono.fromCallable(() -> orderManager.cancelOrder(orderId))
@@ -140,7 +175,7 @@ public class DiscordListener {
                     .onErrorResume(e -> ch.createMessage("❌ Cancel failed: " + e.getMessage()));
         }
 
-        // !HELP
+        // ── !HELP ───────────────────────────────────────────────────────────────
         if (content.equals("!HELP")) {
             return ch.createMessage(helpText());
         }
@@ -150,10 +185,10 @@ public class DiscordListener {
 
     // ── Helpers ──────────────────────────────────────────────────────────────────
 
-    private record AnalysisResult(String text, byte[] chartPng) {}
+    private record ChartedResult(AnalysisService.AnalysisResult analysisResult, byte[] chartPng) {}
 
-    private AnalysisResult runAnalysisWithChart(String ticker) {
-        String text = analysisService.runFullAnalysis(ticker);
+    private ChartedResult runAnalysisWithChart(String ticker) {
+        AnalysisService.AnalysisResult result = analysisService.runFullAnalysis(ticker);
 
         byte[] chart = null;
         try {
@@ -167,19 +202,60 @@ public class DiscordListener {
             log.warn("Chart rendering failed for {}: {}", ticker, e.getMessage());
         }
 
-        return new AnalysisResult(text, chart);
+        return new ChartedResult(result, chart);
+    }
+
+    private String handlePick(String content, String channelId) throws Exception {
+        // !PICK 1 QTY=10
+        String[] parts = content.substring("!PICK ".length()).trim().split("\\s+");
+        if (parts.length < 2) {
+            return "❌ Usage: `!pick 1 qty=10`";
+        }
+
+        List<TradeIdea> pending = sessionStore.get(channelId);
+        if (pending == null || pending.isEmpty()) {
+            return "❌ No pending analysis in this channel. Run `!analyze AAPL` first.";
+        }
+
+        int n;
+        try {
+            n = Integer.parseInt(parts[0]);
+        } catch (NumberFormatException e) {
+            return "❌ Setup number must be an integer. Example: `!pick 1 qty=10`";
+        }
+
+        if (n < 1 || n > pending.size()) {
+            return "❌ Setup " + n + " doesn't exist — analysis returned " + pending.size() + " setup(s).";
+        }
+
+        int qty = 0;
+        for (int i = 1; i < parts.length; i++) {
+            String[] kv = parts[i].split("=");
+            if (kv.length == 2 && kv[0].equals("QTY")) {
+                try { qty = Integer.parseInt(kv[1]); } catch (NumberFormatException ignored) {}
+            }
+        }
+        if (qty <= 0) {
+            return "❌ Must specify quantity. Example: `!pick 1 qty=10`";
+        }
+
+        TradeIdea chosen = pending.get(n - 1);
+        return orderManager.placePlay(
+                chosen.getTicker(),
+                chosen.getDirection().name(),
+                chosen.getEntry(),
+                chosen.getStopLoss(),
+                chosen.getTarget(),
+                qty);
     }
 
     private String parseAndPlaceOrder(String content) throws Exception {
         // !PLAY AAPL LONG E=182.50 S=179 T=189 QTY=10
         String[] parts = content.substring("!PLAY ".length()).trim().split("\\s+");
-        if (parts.length < 6) {
-            return "❌ Usage: `!play AAPL LONG e=182.50 s=179 t=189 qty=10`";
-        }
+        if (parts.length < 6) return "❌ Usage: `!play AAPL LONG e=182.50 s=179 t=189 qty=10`";
 
         String ticker    = parts[0];
-        String direction = parts[1]; // LONG or SHORT
-
+        String direction = parts[1];
         double entry = 0, stop = 0, target = 0;
         int qty = 0;
 
@@ -187,28 +263,24 @@ public class DiscordListener {
             String[] kv = parts[i].split("=");
             if (kv.length != 2) continue;
             switch (kv[0]) {
-                case "E" -> entry  = Double.parseDouble(kv[1]);
-                case "S" -> stop   = Double.parseDouble(kv[1]);
-                case "T" -> target = Double.parseDouble(kv[1]);
-                case "QTY" -> qty  = Integer.parseInt(kv[1]);
+                case "E"   -> entry  = Double.parseDouble(kv[1]);
+                case "S"   -> stop   = Double.parseDouble(kv[1]);
+                case "T"   -> target = Double.parseDouble(kv[1]);
+                case "QTY" -> qty    = Integer.parseInt(kv[1]);
             }
         }
 
-        if (!direction.equals("LONG") && !direction.equals("SHORT")) {
+        if (!direction.equals("LONG") && !direction.equals("SHORT"))
             return "❌ Direction must be `LONG` or `SHORT`.";
-        }
-        if (entry == 0 || stop == 0 || target == 0 || qty == 0) {
+        if (entry == 0 || stop == 0 || target == 0 || qty == 0)
             return "❌ Missing parameters. Usage: `!play AAPL LONG e=182.50 s=179 t=189 qty=10`";
-        }
 
         return orderManager.placePlay(ticker, direction, entry, stop, target, qty);
     }
 
     private boolean channelMatches(MessageChannel ch, String name) {
         if (name == null || name.isBlank()) return true;
-        if (ch instanceof GuildMessageChannel gmc) {
-            return gmc.getName().equalsIgnoreCase(name);
-        }
+        if (ch instanceof GuildMessageChannel gmc) return gmc.getName().equalsIgnoreCase(name);
         return false;
     }
 
@@ -217,11 +289,13 @@ public class DiscordListener {
                 **Trading Bot Commands**
                 `!analyze AAPL` — Full technical + fundamental analysis with chart
                 `!analyze BTC/USD` — Crypto analysis (no fundamentals)
-                `!watch AAPL TSLA BTC/USD` — Add tickers to overnight watchlist
+                `!pick 1 qty=10` — Place setup #1 from the last analysis as a bracket order
+                `!watch AAPL TSLA` — Add tickers to overnight watchlist
+                `!watch AAPL auto` — Add with auto-place HIGH conviction setups overnight
                 `!unwatch AAPL` — Remove ticker from watchlist
                 `!watchlist` — Show current watchlist
                 `!runanalysis` — Trigger overnight analysis now
-                `!play AAPL LONG e=182.50 s=179 t=189 qty=10` — Place bracket order
+                `!play AAPL LONG e=182.50 s=179 t=189 qty=10` — Manual bracket order
                 `!positions` — Show open positions and pending orders
                 `!cancel ORDER_ID` — Cancel a pending order
                 `!help` — Show this message

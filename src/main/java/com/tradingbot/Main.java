@@ -7,6 +7,7 @@ import com.tradingbot.analysis.TechnicalAnalyst;
 import com.tradingbot.chart.ChartRenderer;
 import com.tradingbot.discord.DiscordListener;
 import com.tradingbot.discord.DiscordNotifier;
+import com.tradingbot.discord.SessionStore;
 import com.tradingbot.fundamental.FundamentalDataClient;
 import com.tradingbot.order.OrderManager;
 import com.tradingbot.scheduler.WatchlistScheduler;
@@ -35,6 +36,7 @@ public class Main {
         String channelName      = env.get("DISCORD_CHANNEL_NAME", "");
         String fundamentalModel = env.get("FUNDAMENTAL_LLM_MODEL", "google/gemini-flash-1.5");
         String scheduleTime     = env.get("ANALYSIS_SCHEDULE_TIME", "23:00");
+        int defaultQty          = Integer.parseInt(env.get("DEFAULT_QTY", "1"));
 
         AlpacaClient alpaca           = new AlpacaClient(alpacaKey, alpacaSecret, alpacaMode);
         FundamentalDataClient fdClient = new FundamentalDataClient(alphaVantageKey);
@@ -57,11 +59,13 @@ public class Main {
         }
 
         DiscordNotifier notifier = new DiscordNotifier(gateway, channelName);
-        WatchlistScheduler scheduler = new WatchlistScheduler(notifier, analysisService, scheduleTime);
+        SessionStore sessionStore = new SessionStore();
+        WatchlistScheduler scheduler = new WatchlistScheduler(
+                notifier, analysisService, orderManager, scheduleTime, defaultQty);
         scheduler.start();
 
         DiscordListener listener = new DiscordListener(
-                analysisService, orderManager, scheduler, chartRenderer, channelName);
+                analysisService, orderManager, scheduler, chartRenderer, sessionStore, channelName);
 
         gateway.on(MessageCreateEvent.class, listener::handle).subscribe();
 
