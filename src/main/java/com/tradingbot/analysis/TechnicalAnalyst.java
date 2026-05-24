@@ -54,9 +54,9 @@ public class TechnicalAnalyst {
             TICKER: {ticker}
             TIMEFRAME: {timeframe}
             DIRECTION: LONG or SHORT
-            ENTRY: {price}
-            STOP: {price}
-            TARGET: {price}
+            ENTRY: {price as a single number, e.g. 85.35 — no commentary, ranges, or units on this line}
+            STOP: {price as a single number, e.g. 84.10}
+            TARGET: {price as a single number, e.g. 89.00}
             CONVICTION: HIGH | MEDIUM | LOW
             RATIONALE: {2-3 sentences of analyst commentary}
             RISK: {1 sentence on what would invalidate this trade}
@@ -206,9 +206,9 @@ public class TechnicalAnalyst {
             try {
                 String timeframe = extractField(block, "TIMEFRAME");
                 String dirStr    = extractField(block, "DIRECTION");
-                double entry     = Double.parseDouble(extractField(block, "ENTRY").replace("$", ""));
-                double stop      = Double.parseDouble(extractField(block, "STOP").replace("$", ""));
-                double target    = Double.parseDouble(extractField(block, "TARGET").replace("$", ""));
+                double entry     = extractFirstNumber(extractField(block, "ENTRY"));
+                double stop      = extractFirstNumber(extractField(block, "STOP"));
+                double target    = extractFirstNumber(extractField(block, "TARGET"));
                 String convStr   = extractField(block, "CONVICTION");
                 String rationale = extractField(block, "RATIONALE");
                 String risk      = extractField(block, "RISK");
@@ -238,5 +238,18 @@ public class TechnicalAnalyst {
             }
         }
         return "";
+    }
+
+    // Pulls the first numeric token from a field value, tolerating "$", ranges ("86.20–86.31"),
+    // commentary ("85.35 (current) or scale-in..."), and stray units. Throws if none found
+    // so the surrounding try/catch logs and skips the block.
+    private static final java.util.regex.Pattern FIRST_NUMBER =
+            java.util.regex.Pattern.compile("-?\\d+(?:\\.\\d+)?");
+
+    private static double extractFirstNumber(String raw) {
+        if (raw == null) throw new NumberFormatException("null field");
+        java.util.regex.Matcher m = FIRST_NUMBER.matcher(raw.replace(",", ""));
+        if (!m.find()) throw new NumberFormatException("no number in: " + raw);
+        return Double.parseDouble(m.group());
     }
 }
