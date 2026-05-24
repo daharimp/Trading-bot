@@ -1,16 +1,27 @@
 package com.tradingbot.analysis;
 
-import com.openai.client.OpenAIClient;
-import com.openai.client.okhttp.OpenAIOkHttpClient;
-import com.openai.models.chat.completions.ChatCompletion;
-import com.openai.models.chat.completions.ChatCompletionCreateParams;
+import com.google.gson.JsonArray;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
 import com.tradingbot.model.FundamentalData;
+import okhttp3.MediaType;
+import okhttp3.OkHttpClient;
+import okhttp3.Request;
+import okhttp3.RequestBody;
+import okhttp3.Response;
+import okhttp3.ResponseBody;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
+import java.time.Duration;
 
 public class FundamentalAnalyst {
 
     private static final Logger log = LoggerFactory.getLogger(FundamentalAnalyst.class);
+
+    private static final String OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
+    private static final MediaType JSON = MediaType.parse("application/json");
+    private static final int MAX_TOKENS = 600;
 
     private static final String SYSTEM_PROMPT = """
             You are a fundamental equity analyst with 15 years of experience evaluating
@@ -36,32 +47,59 @@ public class FundamentalAnalyst {
             Keep each bullet concise (1-2 sentences max). Focus on what a trader needs to know.
             """;
 
-    private static final String OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
-
-    private final OpenAIClient client;
+    private final OkHttpClient http;
+    private final String apiKey;
     private final String model;
 
     public FundamentalAnalyst(String openRouterApiKey, String model) {
-        this.client = OpenAIOkHttpClient.builder()
-                .apiKey(openRouterApiKey)
-                .baseUrl(OPENROUTER_BASE_URL)
-                .build();
+        this.apiKey = openRouterApiKey;
         this.model = model;
+        this.http = new OkHttpClient.Builder()
+                .callTimeout(Duration.ofSeconds(120))
+                .readTimeout(Duration.ofSeconds(120))
+                .build();
     }
 
     public String analyze(String ticker, FundamentalData data) {
         String userPrompt = buildPrompt(ticker, data);
 
         try {
-            ChatCompletionCreateParams params = ChatCompletionCreateParams.builder()
-                    .model(model)
-                    .maxCompletionTokens(600)
-                    .addSystemMessage(SYSTEM_PROMPT)
-                    .addUserMessage(userPrompt)
+            JsonObject body = new JsonObject();
+            body.addProperty("model", model);
+            body.addProperty("max_tokens", MAX_TOKENS);
+
+            JsonArray messages = new JsonArray();
+            JsonObject systemMsg = new JsonObject();
+            systemMsg.addProperty("role", "system");
+            systemMsg.addProperty("content", SYSTEM_PROMPT);
+            messages.add(systemMsg);
+
+            JsonObject userMsg = new JsonObject();
+            userMsg.addProperty("role", "user");
+            userMsg.addProperty("content", userPrompt);
+            messages.add(userMsg);
+            body.add("messages", messages);
+
+            Request request = new Request.Builder()
+                    .url(OPENROUTER_URL)
+                    .header("Authorization", "Bearer " + apiKey)
+                    .header("Content-Type", "application/json")
+                    .post(RequestBody.create(body.toString(), JSON))
                     .build();
 
-            ChatCompletion completion = client.chat().completions().create(params);
-            return completion.choices().get(0).message().content().orElse("").trim();
+            try (Response resp = http.newCall(request).execute()) {
+                ResponseBody respBody = resp.body();
+                String raw = respBody != null ? respBody.string() : "";
+                if (!resp.isSuccessful()) {
+                    throw new RuntimeException("OpenRouter API error " + resp.code() + ": " + raw);
+                }
+                JsonObject json = JsonParser.parseString(raw).getAsJsonObject();
+                return json.getAsJsonArray("choices")
+                        .get(0).getAsJsonObject()
+                        .getAsJsonObject("message")
+                        .get("content").getAsString()
+                        .trim();
+            }
 
         } catch (Exception e) {
             log.error("Fundamental LLM analysis failed for {}: {}", ticker, e.getMessage());

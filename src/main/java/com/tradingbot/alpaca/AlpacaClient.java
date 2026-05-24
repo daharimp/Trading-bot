@@ -88,18 +88,13 @@ public class AlpacaClient {
     }
 
     public BarSeries getStockBars(String ticker, Timeframe timeframe) throws IOException {
-        int limit = switch (timeframe) {
-            case M5  -> 100;
-            case M15 -> 100;
-            case H1  -> 100;
-            case H4  -> 60;
-            case D1  -> 60;
-        };
+        int limit = barLimit(timeframe);
+        String start = lookbackStart(timeframe, limit);
 
         for (String feed : new String[]{"sip", "iex"}) {
             String url = String.format(
-                    "%s/v2/stocks/%s/bars?timeframe=%s&limit=%d&adjustment=raw&feed=%s",
-                    DATA_BASE, ticker, timeframe.alpacaCode, limit, feed
+                    "%s/v2/stocks/%s/bars?timeframe=%s&limit=%d&adjustment=raw&feed=%s&start=%s",
+                    DATA_BASE, ticker, timeframe.alpacaCode, limit, feed, start
             );
             Request request = new Request.Builder()
                     .url(url)
@@ -118,18 +113,13 @@ public class AlpacaClient {
     }
 
     public BarSeries getCryptoBars(String pair, Timeframe timeframe) throws IOException {
-        int limit = switch (timeframe) {
-            case M5  -> 100;
-            case M15 -> 100;
-            case H1  -> 100;
-            case H4  -> 60;
-            case D1  -> 60;
-        };
+        int limit = barLimit(timeframe);
+        String start = lookbackStart(timeframe, limit);
 
-        String encodedPair = URLEncoder.encode(pair, StandardCharsets.UTF_8);
+        String encodedSymbol = URLEncoder.encode(pair, StandardCharsets.UTF_8);
         String url = String.format(
-                "%s/v2/crypto/%s/bars?timeframe=%s&limit=%d",
-                DATA_BASE, encodedPair, timeframe.alpacaCode, limit
+                "%s/v1beta3/crypto/us/bars?symbols=%s&timeframe=%s&limit=%d&start=%s",
+                DATA_BASE, encodedSymbol, timeframe.alpacaCode, limit, start
         );
 
         Request request = new Request.Builder()
@@ -143,12 +133,40 @@ public class AlpacaClient {
                 throw new IOException("Alpaca crypto bars HTTP " + response.code() + " for " + pair);
             }
             String body = response.body().string();
-            BarSeries series = parseBars(pair + "_" + timeframe.displayName, body);
+            // v1beta3 returns {"bars": {"BTC/USD": [...]}}; unwrap to the stock-shaped {"bars": [...]}
+            JsonObject root = JsonParser.parseString(body).getAsJsonObject();
+            JsonObject barsBySymbol = root.has("bars") && root.get("bars").isJsonObject()
+                    ? root.getAsJsonObject("bars") : new JsonObject();
+            JsonArray bars = barsBySymbol.has(pair) && barsBySymbol.get(pair).isJsonArray()
+                    ? barsBySymbol.getAsJsonArray(pair) : new JsonArray();
+            JsonObject normalized = new JsonObject();
+            normalized.add("bars", bars);
+            BarSeries series = parseBars(pair + "_" + timeframe.displayName, normalized.toString());
             if (series.getBarCount() == 0) {
                 throw new IOException("No crypto bar data returned for " + pair);
             }
             return series;
         }
+    }
+
+    private static int barLimit(Timeframe timeframe) {
+        return switch (timeframe) {
+            case M5, M15, H1 -> 100;
+            case H4, D1 -> 60;
+        };
+    }
+
+    private static String lookbackStart(Timeframe timeframe, int limit) {
+        Duration perBar = switch (timeframe) {
+            case M5  -> Duration.ofMinutes(5);
+            case M15 -> Duration.ofMinutes(15);
+            case H1  -> Duration.ofHours(1);
+            case H4  -> Duration.ofHours(4);
+            case D1  -> Duration.ofDays(1);
+        };
+        // Multiply by 4 to absorb weekends, holidays, and after-hours gaps so `limit` bars are reachable.
+        ZonedDateTime start = ZonedDateTime.now(java.time.ZoneOffset.UTC).minus(perBar.multipliedBy(limit * 4L));
+        return start.format(DateTimeFormatter.ISO_INSTANT);
     }
 
     // ── Trading API ──────────────────────────────────────────────────────────────

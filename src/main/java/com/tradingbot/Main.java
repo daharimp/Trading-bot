@@ -14,6 +14,8 @@ import com.tradingbot.scheduler.WatchlistScheduler;
 import discord4j.core.DiscordClient;
 import discord4j.core.GatewayDiscordClient;
 import discord4j.core.event.domain.message.MessageCreateEvent;
+import discord4j.gateway.intent.Intent;
+import discord4j.gateway.intent.IntentSet;
 import io.github.cdimascio.dotenv.Dotenv;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -28,28 +30,34 @@ public class Main {
         String discordToken     = requireEnv(env, "DISCORD_BOT_TOKEN");
         String alpacaKey        = requireEnv(env, "ALPACA_API_KEY");
         String alpacaSecret     = requireEnv(env, "ALPACA_API_SECRET");
-        String openAiKey        = requireEnv(env, "OPENAI_API_KEY");
+        String anthropicKey     = requireEnv(env, "ANTHROPIC_API_KEY");
         String alphaVantageKey  = requireEnv(env, "ALPHA_VANTAGE_API_KEY");
         String openRouterKey    = requireEnv(env, "OPENROUTER_API_KEY");
 
         String alpacaMode       = env.get("ALPACA_MODE", "paper");
         String channelName      = env.get("DISCORD_CHANNEL_NAME", "");
-        String fundamentalModel = env.get("FUNDAMENTAL_LLM_MODEL", "google/gemini-flash-1.5");
+        String fundamentalModel = env.get("FUNDAMENTAL_LLM_MODEL", "tencent/hunyuan-3-preview");
+        String technicalModel   = env.get("TECHNICAL_LLM_MODEL", "claude-sonnet-4-6");
         String scheduleTime     = env.get("ANALYSIS_SCHEDULE_TIME", "23:00");
         int defaultQty          = Integer.parseInt(env.get("DEFAULT_QTY", "1"));
 
         AlpacaClient alpaca           = new AlpacaClient(alpacaKey, alpacaSecret, alpacaMode);
         FundamentalDataClient fdClient = new FundamentalDataClient(alphaVantageKey);
-        TechnicalAnalyst techAnalyst  = new TechnicalAnalyst(openAiKey);
+        TechnicalAnalyst techAnalyst  = new TechnicalAnalyst(anthropicKey, technicalModel);
         FundamentalAnalyst fundAnalyst = new FundamentalAnalyst(openRouterKey, fundamentalModel);
         AnalysisService analysisService = new AnalysisService(alpaca, techAnalyst, fundAnalyst, fdClient);
         OrderManager orderManager     = new OrderManager(alpaca);
         ChartRenderer chartRenderer   = new ChartRenderer();
 
-        log.info("Starting Trading Bot (Alpaca: {} | Technical: GPT-4o | Fundamental: {} | Schedule: {}ET)",
-                alpacaMode, fundamentalModel, scheduleTime);
+        log.info("Starting Trading Bot (Alpaca: {} | Technical: {} | Fundamental: {} | Schedule: {}ET)",
+                alpacaMode, technicalModel, fundamentalModel, scheduleTime);
 
         GatewayDiscordClient gateway = DiscordClient.create(discordToken)
+                .gateway()
+                .setEnabledIntents(IntentSet.of(
+                        Intent.GUILDS,
+                        Intent.GUILD_MESSAGES,
+                        Intent.MESSAGE_CONTENT))
                 .login()
                 .block();
 

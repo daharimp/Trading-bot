@@ -1,22 +1,32 @@
 package com.tradingbot.analysis;
 
-import com.openai.client.OpenAIClient;
-import com.openai.client.okhttp.OpenAIOkHttpClient;
-import com.openai.models.chat.completions.ChatCompletion;
-import com.openai.models.chat.completions.ChatCompletionCreateParams;
-import com.openai.models.ChatModel;
+import com.google.gson.JsonArray;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
 import com.tradingbot.alpaca.AlpacaClient;
 import com.tradingbot.model.TradeIdea;
+import okhttp3.MediaType;
+import okhttp3.OkHttpClient;
+import okhttp3.Request;
+import okhttp3.RequestBody;
+import okhttp3.Response;
+import okhttp3.ResponseBody;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.ta4j.core.BarSeries;
 
+import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 
 public class TechnicalAnalyst {
 
     private static final Logger log = LoggerFactory.getLogger(TechnicalAnalyst.class);
+
+    private static final String ANTHROPIC_URL = "https://api.anthropic.com/v1/messages";
+    private static final String ANTHROPIC_VERSION = "2023-06-01";
+    private static final MediaType JSON = MediaType.parse("application/json");
+    private static final int MAX_TOKENS = 2000;
 
     private static final String SYSTEM_PROMPT = """
             You are an expert equities trader and technical analyst with 15 years of experience
@@ -55,11 +65,16 @@ public class TechnicalAnalyst {
             If no setups are worth taking, respond with exactly: NO_SETUPS
             """;
 
-    private final OpenAIClient client;
+    private final OkHttpClient http;
+    private final String apiKey;
+    private final String model;
 
-    public TechnicalAnalyst(String apiKey) {
-        this.client = OpenAIOkHttpClient.builder()
-                .apiKey(apiKey)
+    public TechnicalAnalyst(String anthropicApiKey, String model) {
+        this.apiKey = anthropicApiKey;
+        this.model = model;
+        this.http = new OkHttpClient.Builder()
+                .callTimeout(Duration.ofSeconds(120))
+                .readTimeout(Duration.ofSeconds(120))
                 .build();
     }
 
@@ -71,15 +86,7 @@ public class TechnicalAnalyst {
         String userPrompt = buildUserPrompt(ticker, seriesMap, candidatesByTimeframe);
 
         try {
-            ChatCompletionCreateParams params = ChatCompletionCreateParams.builder()
-                    .model(ChatModel.GPT_4O)
-                    .maxCompletionTokens(2000)
-                    .addSystemMessage(SYSTEM_PROMPT)
-                    .addUserMessage(userPrompt)
-                    .build();
-
-            ChatCompletion completion = client.chat().completions().create(params);
-            String response = completion.choices().get(0).message().content().orElse("").trim();
+            String response = callAnthropic(userPrompt);
 
             if (response.equals("NO_SETUPS") || response.isBlank()) {
                 return List.of();
@@ -88,10 +95,50 @@ public class TechnicalAnalyst {
             return parseResponse(ticker, response);
 
         } catch (Exception e) {
-            log.error("GPT-4o technical analysis failed for {}: {}", ticker, e.getMessage());
+            log.error("Anthropic technical analysis failed for {}: {}", ticker, e.getMessage());
             return candidatesByTimeframe.values().stream()
                     .flatMap(List::stream)
                     .toList();
+        }
+    }
+
+    private String callAnthropic(String userPrompt) throws Exception {
+        JsonObject body = new JsonObject();
+        body.addProperty("model", model);
+        body.addProperty("max_tokens", MAX_TOKENS);
+        body.addProperty("system", SYSTEM_PROMPT);
+
+        JsonArray messages = new JsonArray();
+        JsonObject userMsg = new JsonObject();
+        userMsg.addProperty("role", "user");
+        userMsg.addProperty("content", userPrompt);
+        messages.add(userMsg);
+        body.add("messages", messages);
+
+        Request request = new Request.Builder()
+                .url(ANTHROPIC_URL)
+                .header("x-api-key", apiKey)
+                .header("anthropic-version", ANTHROPIC_VERSION)
+                .header("content-type", "application/json")
+                .post(RequestBody.create(body.toString(), JSON))
+                .build();
+
+        try (Response resp = http.newCall(request).execute()) {
+            ResponseBody respBody = resp.body();
+            String raw = respBody != null ? respBody.string() : "";
+            if (!resp.isSuccessful()) {
+                throw new RuntimeException("Anthropic API error " + resp.code() + ": " + raw);
+            }
+            JsonObject json = JsonParser.parseString(raw).getAsJsonObject();
+            JsonArray content = json.getAsJsonArray("content");
+            StringBuilder text = new StringBuilder();
+            for (var element : content) {
+                JsonObject block = element.getAsJsonObject();
+                if ("text".equals(block.get("type").getAsString())) {
+                    text.append(block.get("text").getAsString());
+                }
+            }
+            return text.toString().trim();
         }
     }
 
@@ -177,7 +224,7 @@ public class TechnicalAnalyst {
                         entry, stop, target, conviction, rationale + " ⚠️ " + risk));
 
             } catch (Exception e) {
-                log.warn("Failed to parse GPT-4o setup block: {}", e.getMessage());
+                log.warn("Failed to parse Claude setup block: {}", e.getMessage());
             }
         }
 

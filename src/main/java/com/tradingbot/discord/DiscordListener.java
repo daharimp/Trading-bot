@@ -74,19 +74,10 @@ public class DiscordListener {
                                 String channelId = ch.getId().asString();
                                 sessionStore.store(channelId, result.analysisResult().ideas());
 
-                                // Send analysis + chart
-                                Mono<?> analysisMsg;
-                                if (result.chartPng() != null) {
-                                    analysisMsg = status.getChannel().flatMap(c -> c.createMessage(
-                                            MessageCreateSpec.builder()
-                                                    .content(result.analysisResult().text())
-                                                    .addFile("chart.png",
-                                                            new ByteArrayInputStream(result.chartPng()))
-                                                    .build()));
-                                } else {
-                                    analysisMsg = status.getChannel()
-                                            .flatMap(c -> c.createMessage(result.analysisResult().text()));
-                                }
+                                // Send analysis + chart, chunked under Discord's 2000-char message limit.
+                                // Chart attaches to the first chunk only.
+                                Mono<?> analysisMsg = status.getChannel().flatMap(c ->
+                                        sendChunked(c, result.analysisResult().text(), result.chartPng()));
 
                                 // Send pick menu as a second message if there are setups
                                 String pickMenu = analysisService.buildPickMenu(
@@ -300,5 +291,47 @@ public class DiscordListener {
                 `!cancel ORDER_ID` — Cancel a pending order
                 `!help` — Show this message
                 """;
+    }
+
+    // Discord hard-caps message content at 2000 chars. Split on paragraph/line boundaries
+    // (never mid-word), attach the chart to the first chunk only, and send sequentially.
+    private static final int DISCORD_MAX = 1900; // leave headroom for safety
+
+    private static Mono<?> sendChunked(MessageChannel ch, String text, byte[] chartPng) {
+        List<String> chunks = chunk(text == null ? "" : text, DISCORD_MAX);
+        if (chunks.isEmpty()) chunks = List.of("(empty analysis)");
+
+        Mono<Message> chain = null;
+        for (int i = 0; i < chunks.size(); i++) {
+            String body = chunks.get(i);
+            boolean first = (i == 0);
+            Mono<Message> step;
+            if (first && chartPng != null) {
+                step = ch.createMessage(MessageCreateSpec.builder()
+                        .content(body)
+                        .addFile("chart.png", new ByteArrayInputStream(chartPng))
+                        .build());
+            } else {
+                step = ch.createMessage(body);
+            }
+            chain = (chain == null) ? step : chain.then(step);
+        }
+        return chain;
+    }
+
+    private static List<String> chunk(String text, int max) {
+        List<String> out = new java.util.ArrayList<>();
+        String remaining = text;
+        while (remaining.length() > max) {
+            // Prefer breaking at a paragraph (blank line), then a newline, then a space.
+            int cut = remaining.lastIndexOf("\n\n", max);
+            if (cut < max / 2) cut = remaining.lastIndexOf('\n', max);
+            if (cut < max / 2) cut = remaining.lastIndexOf(' ', max);
+            if (cut <= 0) cut = max; // hard cut; no whitespace in this window
+            out.add(remaining.substring(0, cut));
+            remaining = remaining.substring(cut).stripLeading();
+        }
+        if (!remaining.isEmpty()) out.add(remaining);
+        return out;
     }
 }
