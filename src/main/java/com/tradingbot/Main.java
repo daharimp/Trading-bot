@@ -37,13 +37,13 @@ public class Main {
         String alpacaMode       = env.get("ALPACA_MODE", "paper");
         String channelName      = env.get("DISCORD_CHANNEL_NAME", "");
         String fundamentalModel = env.get("FUNDAMENTAL_LLM_MODEL", "tencent/hunyuan-3-preview");
-        String technicalModel   = env.get("TECHNICAL_LLM_MODEL", "claude-sonnet-4-6");
+        String technicalModel   = env.get("TECHNICAL_LLM_MODEL", "mistralai/mistral-small-3.2-24b-instruct");
         String scheduleTime     = env.get("ANALYSIS_SCHEDULE_TIME", "23:00");
         int defaultQty          = Integer.parseInt(env.get("DEFAULT_QTY", "1"));
 
         AlpacaClient alpaca           = new AlpacaClient(alpacaKey, alpacaSecret, alpacaMode);
         FundamentalDataClient fdClient = new FundamentalDataClient(alphaVantageKey);
-        TechnicalAnalyst techAnalyst  = new TechnicalAnalyst(anthropicKey, technicalModel);
+        TechnicalAnalyst techAnalyst  = new TechnicalAnalyst(anthropicKey, openRouterKey, technicalModel);
         FundamentalAnalyst fundAnalyst = new FundamentalAnalyst(openRouterKey, fundamentalModel);
         AnalysisService analysisService = new AnalysisService(alpaca, techAnalyst, fundAnalyst, fdClient);
         OrderManager orderManager     = new OrderManager(alpaca);
