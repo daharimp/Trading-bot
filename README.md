@@ -1,8 +1,8 @@
-# 📊 Trading Bot
+# Trading Bot
 
-A Java-based Discord trading assistant that performs **multi-timeframe technical analysis** and **fundamental analysis** on any US equity ticker — powered by GPT-4o, Alpaca Markets, and Alpha Vantage.
+A Java Discord bot that performs multi-timeframe technical and fundamental analysis on US equities and crypto — then lets you place bracket orders directly from Discord.
 
-Drop a ticker in your Discord channel. Get institutional-grade analysis back in seconds.
+Runs 24/7 on Fly.io. Never depends on your machine being awake.
 
 ---
 
@@ -13,35 +13,43 @@ Discord !analyze AAPL
          │
          ▼
    Alpaca Markets
-   (OHLCV bars across 5m / 15m / 1H / 4H / 1D)
+   (OHLCV bars: 5m / 15m / 1H / 4H / 1D)
          │
          ▼
    TA4J Rules Engine
    (EMA stacks, RSI, ATR, volume-confirmed crosses)
          │
-         ├──────────────────────────────────┐
-         ▼                                  ▼
-   GPT-4o (Technical)            Alpha Vantage + OpenRouter
-   Validates/rewrites             (Fundamental data → Gemini/LLM)
-   candidate setups               P/E, EPS, margins, earnings
-         │                                  │
-         └──────────────┬───────────────────┘
+         ├──────────────────────────────────────┐
+         ▼                                      ▼
+   Claude Sonnet (Technical)          Alpha Vantage + OpenRouter
+   Validates/rewrites candidate       P/E, EPS, margins, earnings
+   setups with star ratings           rated by configurable LLM
+         │                                      │
+         └──────────────┬────────────────────────┘
                         ▼
               Discord Response
-              (Setups, levels, rationale, fundamental rating)
+              Chart image + chunked analysis
+                        │
+                        ▼
+              !pick 1 qty=10
+              Places bracket order on Alpaca
+              (entry limit + stop + take-profit)
 ```
 
 ---
 
 ## Features
 
-- **5-Timeframe Analysis** — 5m, 15m, 1H, 4H, 1D bars fetched from Alpaca
-- **Rules-Based Setup Generation** — EMA trend continuation, RSI oversold/overbought, volume-confirmed EMA crosses
-- **GPT-4o Technical Review** — Validates, enriches, or rejects rule-engine setups with macro context, divergences, and pattern recognition
-- **Fundamental Analysis** — P/E ratio, EPS, margins, earnings history, analyst targets via Alpha Vantage; analyzed by a configurable LLM via OpenRouter
-- **Parallel Execution** — Technical and fundamental pipelines run concurrently for fast turnaround
-- **Discord Integration** — Fully formatted output with entry, stop, target, R:R, conviction badge, and rationale
-- **Paper / Live Mode Toggle** — Switch between Alpaca paper and live endpoints via `.env`
+- **5-Timeframe Analysis** — 5m, 15m, 1H, 4H, 1D bars from Alpaca
+- **Rules-Based Setup Generation** — EMA trend continuation, RSI extremes, volume-confirmed EMA crosses
+- **Claude Technical Review** — Validates and enriches rule-engine setups with macro context, divergences, and star ratings
+- **Fundamental Analysis** — P/E, EPS, margins, earnings via Alpha Vantage; rated by a configurable LLM on OpenRouter
+- **Parallel Execution** — Technical and fundamental pipelines run concurrently
+- **Chart Rendering** — Candlestick chart attached to the first Discord message
+- **Bracket Order Placement** — `!pick N qty=X` places entry limit + stop-loss + take-profit on Alpaca
+- **Watchlist Scheduler** — Runs overnight analysis at a configurable time (default 23:00 ET) and auto-places HIGH conviction setups
+- **Crypto Support** — `!analyze BTC/USD` via Alpaca's v1beta3 crypto endpoint (no fundamentals for crypto)
+- **Paper / Live Toggle** — Switch between Alpaca paper and live trading via `ALPACA_MODE`
 
 ---
 
@@ -50,125 +58,135 @@ Discord !analyze AAPL
 | Layer | Technology |
 |---|---|
 | Language | Java 21 |
-| Discord | Discord4J |
-| Market Data | Alpaca Markets API |
+| Discord | Discord4J 3.2.6 |
+| Market Data | Alpaca Markets API (v2 stocks, v1beta3 crypto) |
 | Fundamental Data | Alpha Vantage API |
 | Technical Indicators | TA4J |
-| Technical LLM | OpenAI GPT-4o |
-| Fundamental LLM | OpenRouter (default: `google/gemini-flash-1.5`) |
+| Technical LLM | Anthropic Claude (default: `claude-sonnet-4-6`) |
+| Fundamental LLM | OpenRouter (default: `tencent/hunyuan-3-preview`) |
 | HTTP Client | OkHttp |
 | JSON | Gson |
 | Env Config | dotenv-java |
-| Logging | SLF4J |
+| Build | Maven (fat jar via shade plugin) |
+| Container | Docker (eclipse-temurin:21-jre-jammy, 107 MB) |
+| Hosting | Fly.io (shared-cpu-1x, 512 MB, `iad` region) |
 
 ---
 
-## Prerequisites
+## Discord Commands
 
-- Java 21+
-- Maven 3.8+
-- A Discord bot token with **Message Content Intent** enabled
-- Alpaca Markets account (paper or live)
-- Alpha Vantage API key (free tier works; 5 req/min)
-- OpenAI API key (GPT-4o access)
-- OpenRouter API key
+| Command | Description |
+| --- | --- |
+| `!analyze AAPL` | Full technical + fundamental analysis with chart |
+| `!analyze BTC/USD` | Crypto analysis (no fundamentals) |
+| `!pick 1 qty=10` | Place setup #1 from the last analysis as a bracket order |
+| `!watch AAPL TSLA` | Add tickers to overnight watchlist |
+| `!watch AAPL auto` | Add with auto-place for HIGH conviction setups at schedule time |
+| `!unwatch AAPL` | Remove ticker from watchlist |
+| `!watchlist` | Show current watchlist |
+| `!runanalysis` | Trigger overnight analysis immediately |
+| `!play AAPL LONG e=182.50 s=179 t=189 qty=10` | Manual bracket order |
+| `!positions` | Show open positions and pending orders |
+| `!cancel ORDER_ID` | Cancel a pending order |
+| `!help` | Show command reference |
 
 ---
 
 ## Setup
 
-### 1. Clone the repository
+### 1. Clone
 
 ```bash
-git clone https://github.com/youruser/trading-bot.git
+git clone https://github.com/daharimp/trading-bot.git
 cd trading-bot
 ```
 
-### 2. Configure environment variables
-
-Copy the example env file and fill in your credentials:
+### 2. Configure secrets
 
 ```bash
 cp .env.example .env
 ```
 
+Edit `.env`:
+
 ```env
-# Discord
-DISCORD_BOT_TOKEN=your_discord_bot_token
-DISCORD_CHANNEL_NAME=signals          # Leave blank to respond in any channel
+DISCORD_BOT_TOKEN=        # Bot token from Discord Developer Portal
+DISCORD_CHANNEL_NAME=     # Channel name to restrict to (blank = all channels)
 
-# Alpaca
-ALPACA_API_KEY=your_alpaca_key
-ALPACA_API_SECRET=your_alpaca_secret
-ALPACA_MODE=paper                     # paper | live
+ALPACA_API_KEY=           # Alpaca key
+ALPACA_API_SECRET=        # Alpaca secret
+ALPACA_MODE=paper         # paper | live
 
-# OpenAI (GPT-4o — technical analysis)
-OPENAI_API_KEY=your_openai_key
+ANTHROPIC_API_KEY=        # Claude API key (technical analysis)
+ALPHA_VANTAGE_API_KEY=    # Alpha Vantage key (fundamental data)
+OPENROUTER_API_KEY=       # OpenRouter key (fundamental LLM)
 
-# Alpha Vantage (fundamental data)
-ALPHA_VANTAGE_API_KEY=your_alphavantage_key
-
-# OpenRouter (fundamental LLM)
-OPENROUTER_API_KEY=your_openrouter_key
-FUNDAMENTAL_LLM_MODEL=google/gemini-flash-1.5   # Any OpenRouter model
+FUNDAMENTAL_LLM_MODEL=tencent/hunyuan-3-preview   # Any OpenRouter model
+TECHNICAL_LLM_MODEL=claude-sonnet-4-6              # Any Anthropic model
+ANALYSIS_SCHEDULE_TIME=23:00                        # ET, 24h format
+DEFAULT_QTY=1
 ```
+
+> **Discord setup:** Enable **Message Content Intent** in the Discord Developer Portal under your bot's settings (Bot → Privileged Gateway Intents).
 
 ### 3. Build
 
 ```bash
-mvn clean package -q
+mvn package -q
 ```
 
-### 4. Run
+### 4. Run locally
 
 ```bash
-java -jar target/trading-bot.jar
+java -jar target/trading-bot-1.0-SNAPSHOT.jar
+```
+
+Or with Docker Desktop:
+
+```bash
+docker build -t trading-bot .
+docker run --rm --env-file .env --name trading-bot trading-bot
 ```
 
 ---
 
-## Usage
+## Deploy to Fly.io (Production)
 
-In your configured Discord channel, type:
+The bot runs as a persistent background worker — no HTTP endpoints, no scale-to-zero.
 
+```bash
+# One-time setup
+flyctl auth login
+flyctl launch --no-deploy --name your-app-name
+flyctl secrets import < .env
+
+# Deploy
+flyctl deploy
+
+# Verify
+flyctl logs --app your-app-name | grep "Bot online"
 ```
-!analyze AAPL
-```
 
-The bot will respond with a full analysis block:
+### Operations reference
 
-```
-📊 AAPL | $213.42 | RSI 54 | ATR 3.21
-━━━━━━━━━━━━━━━━━━━━━━━━━
-GPT-4o identified 2 setup(s):
+```bash
+# Status
+flyctl status --app your-app-name
 
-── 1H ──
-📈 LONG AAPL | `1H` | 🔥 HIGH
-> Entry:      $213.42
-> Stop Loss:  $209.80
-> Target:     $220.66
-> R:R:        1:2.0
-> Bull EMA stack confirmed across 1H and 4H. Volume 1.4x above average on the cross. ⚠️ Trade invalidates on close below EMA21.
+# Live logs
+flyctl logs --app your-app-name
 
-── 1D ──
-📈 LONG AAPL | `1D` | ⚡ MEDIUM
-> Entry:      $213.42
-> Stop Loss:  $207.10
-> Target:     $226.06
-> R:R:        1:2.0
-> Daily trend intact. RSI 54 — room to run. Watch for resistance near 52-week high. ⚠️ Earnings risk within 3 weeks.
+# Restart
+flyctl machine restart --app your-app-name
 
-━━━━━━━━━━━━━━━━━━━━━━━━━
-📋 FUNDAMENTAL ANALYSIS
+# Redeploy after code changes
+mvn package -q && flyctl deploy --app your-app-name
 
-FUNDAMENTAL RATING: BUY
-• Revenue grew 8% YoY — services segment accelerating and expanding margins
-• P/E of 28x is in line with large-cap tech peers; not stretched given FCF profile
-• Analyst 12-month target of $235 implies ~10% upside from current price
-• Debt/equity manageable at 1.5x; strong buyback program provides price support
-• Next earnings in ~3 weeks — binary event risk; size positions accordingly
+# Update a secret
+flyctl secrets set ANTHROPIC_API_KEY=new_value --app your-app-name
 
-⚠️ AI-generated analysis — not financial advice. Manage your own risk.
+# SSH into running container
+flyctl ssh console --app your-app-name
 ```
 
 ---
@@ -177,68 +195,68 @@ FUNDAMENTAL RATING: BUY
 
 ```
 src/main/java/com/tradingbot/
-├── Main.java                          # Entry point, dependency wiring
+├── Main.java                        # Entry point, dependency wiring
 ├── alpaca/
-│   └── AlpacaClient.java             # Fetches OHLCV bar data from Alpaca
+│   └── AlpacaClient.java           # OHLCV bars (stocks + crypto), order placement
 ├── analysis/
-│   ├── IndicatorEngine.java          # TA4J wrapper (EMA, RSI, ATR, volume)
-│   ├── TradeIdeaGenerator.java       # Rules-based setup candidates
-│   ├── TechnicalAnalyst.java         # GPT-4o setup validation & enrichment
-│   └── FundamentalAnalyst.java       # OpenRouter LLM fundamental rating
+│   ├── AnalysisService.java        # Orchestrates parallel TA + FA pipelines
+│   ├── IndicatorEngine.java        # TA4J wrapper (EMA, RSI, ATR, volume)
+│   ├── TradeIdeaGenerator.java     # Rules-based setup candidates
+│   ├── TechnicalAnalyst.java       # Claude setup validation & enrichment
+│   └── FundamentalAnalyst.java     # OpenRouter LLM fundamental rating
+├── chart/
+│   └── ChartRenderer.java          # Candlestick chart → PNG bytes
 ├── discord/
-│   └── DiscordListener.java          # Event handler, orchestrates full pipeline
+│   ├── DiscordListener.java        # Command router, chunked message sending
+│   ├── DiscordNotifier.java        # Proactive notifications (scheduler)
+│   └── SessionStore.java           # Per-channel setup state for !pick
 ├── fundamental/
-│   └── FundamentalDataClient.java    # Alpha Vantage OVERVIEW + EARNINGS fetch
-└── model/
-    ├── TradeIdea.java                 # Setup model (entry, stop, target, R:R)
-    └── FundamentalData.java          # Fundamental metrics model
+│   └── FundamentalDataClient.java  # Alpha Vantage OVERVIEW + EARNINGS fetch
+├── model/
+│   ├── TradeIdea.java              # Setup model (entry, stop, target, R:R, conviction)
+│   └── FundamentalData.java        # Fundamental metrics model
+├── order/
+│   └── OrderManager.java           # Bracket order placement + position/order queries
+└── scheduler/
+    └── WatchlistScheduler.java     # Nightly analysis cron runner
 ```
 
 ---
 
-## Trade Setups — Rules Engine
-
-The `TradeIdeaGenerator` identifies four setup types before passing candidates to GPT-4o:
+## Rules Engine — Setup Types
 
 | Setup | Condition | Direction |
-|---|---|---|
+| --- | --- | --- |
 | EMA Trend Continuation | 9 > 21 > 50 (or inverse), RSI not extreme | LONG / SHORT |
 | RSI Oversold Bounce | RSI < 32, price above EMA50 | LONG |
 | RSI Overbought Fade | RSI > 68, price below EMA50 | SHORT |
 | Volume-Confirmed EMA Cross | EMA9/21 cross within 3 bars, volume > 1.3× avg | LONG / SHORT |
 
-All setups must meet a minimum **1.5:1 R:R** to be forwarded to GPT-4o.
+Minimum 1.5:1 R:R required to forward a candidate to Claude.
 
 ---
 
-## Indicators
+## API Usage per `!analyze`
 
-Computed by `IndicatorEngine` via TA4J at the latest bar of each timeframe:
+Each `!analyze` call makes the following requests:
 
-- **EMA 9, 21, 50** — trend direction and stack alignment
-- **RSI (14)** — momentum and extremes
-- **ATR (14)** — volatility-based stop sizing
-- **Volume** — current vs. 20-bar average ratio
-- **Swing High / Low** — structural support/resistance over N bars
+| Service | Calls | Notes |
+| --- | --- | --- |
+| Alpaca | 5 | One bar request per timeframe (5m/15m/1H/4H/1D). Stocks retry on `sip` then `iex` feed. |
+| Anthropic (Claude) | 1 | Single call with full multi-timeframe indicator snapshot + candidate setups |
+| Alpha Vantage | 2 | `OVERVIEW` + `EARNINGS` endpoints (skipped for crypto) |
+| OpenRouter | 1 | Single fundamental rating call (skipped for crypto) |
 
----
-
-## Configuration Notes
-
-- `DISCORD_CHANNEL_NAME` — Set to a channel name (e.g. `signals`) to restrict the bot to one channel. Leave blank to respond anywhere.
-- `ALPACA_MODE` — Both `paper` and `live` use the same data endpoint (`data.alpaca.markets`). Set `live` for live trading account context.
-- `FUNDAMENTAL_LLM_MODEL` — Any model available on OpenRouter (e.g. `anthropic/claude-3-haiku`, `mistralai/mixtral-8x7b-instruct`). Defaults to `google/gemini-flash-1.5`.
-- Alpha Vantage free tier: 25 requests/day, 5 requests/minute. The client adds a 500ms delay between calls to stay within limits.
+**Total: 9 calls for equities, 6 for crypto.**
 
 ---
 
-## Limitations & Disclaimer
+## Limitations
 
-- **Not financial advice.** This tool is for informational and educational purposes only.
-- Analysis quality depends on the underlying LLM and the bar data available. Low-liquidity tickers may have incomplete data.
-- GPT-4o has no memory of previous analyses. Each `!analyze` call is stateless.
-- Alpha Vantage free tier rate limits may cause fundamental data failures during rapid successive requests.
-- The bot does **not** place trades. It is a read-only analysis assistant.
+- **Stateless watchlist** — `!watch` entries are held in memory and reset on restart. No persistence layer yet.
+- **Alpha Vantage free tier** — 25 req/day, 5 req/min. Rapid successive `!analyze` calls may hit the rate limit.
+- **Crypto** — No fundamental analysis. Technical analysis works via Alpaca's crypto bars endpoint.
+- **Not financial advice.** For informational and educational purposes only.
 
 ---
 
