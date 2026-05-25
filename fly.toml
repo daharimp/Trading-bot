@@ -1,0 +1,17 @@
+# fly.toml app configuration file generated for trading-bot-satin-pond-7512 on 2026-05-24T17:02:59-07:00
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
+
+app = 'trading-bot-satin-pond-7512'
+primary_region = 'iad'
+
+[build]
+
+[env]
+  ALPACA_MODE = 'paper'
+
+[[vm]]
+  size = 'shared-cpu-1x'
+  memory = '512mb'
+  count = 1
