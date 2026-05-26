@@ -2,6 +2,7 @@ package com.tradingbot.analysis;
 
 import com.tradingbot.alpaca.AlpacaClient;
 import com.tradingbot.fundamental.FundamentalDataClient;
+import com.tradingbot.kraken.KrakenClient;
 import com.tradingbot.model.FundamentalData;
 import com.tradingbot.model.TradeIdea;
 import org.slf4j.Logger;
@@ -18,7 +19,8 @@ public class AnalysisService {
 
     private static final Logger log = LoggerFactory.getLogger(AnalysisService.class);
 
-    public record AnalysisResult(String text, List<TradeIdea> ideas) {}
+    public record AnalysisResult(String text, List<TradeIdea> ideas,
+                                  Map<AlpacaClient.Timeframe, BarSeries> seriesMap) {}
 
     private static final String[] NUMBER_EMOJIS = {"1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"};
 
@@ -47,26 +49,40 @@ public class AnalysisService {
 
     /**
      * Runs full multi-timeframe technical + fundamental analysis.
-     * Returns an AnalysisResult containing the formatted text and the list of TradeIdeas.
+     * Returns an AnalysisResult containing the formatted text, trade ideas, and the bar series map.
      */
     public AnalysisResult runFullAnalysis(String ticker) {
+        return runFullAnalysis(ticker, null);
+    }
+
+    /**
+     * Overload that accepts a pre-fetched seriesMap (used by the overnight scheduler to avoid
+     * re-fetching bars that were already batch-loaded). Pass null to fetch normally.
+     */
+    public AnalysisResult runFullAnalysis(String ticker,
+                                           Map<AlpacaClient.Timeframe, BarSeries> preloadedSeries) {
         boolean crypto = AlpacaClient.isCrypto(ticker);
         String normalizedTicker = crypto ? AlpacaClient.normalizeCryptoTicker(ticker) : ticker;
 
-        // Step 1: Fetch bars for all timeframes
-        Map<AlpacaClient.Timeframe, BarSeries> seriesMap = new LinkedHashMap<>();
-        for (AlpacaClient.Timeframe tf : TIMEFRAMES) {
-            try {
-                seriesMap.put(tf, alpaca.getBars(normalizedTicker, tf));
-            } catch (Exception e) {
-                log.warn("Could not fetch {} {} bars: {}", normalizedTicker, tf.displayName, e.getMessage());
+        // Step 1: Use pre-loaded bars or fetch individually
+        Map<AlpacaClient.Timeframe, BarSeries> seriesMap;
+        if (preloadedSeries != null && !preloadedSeries.isEmpty()) {
+            seriesMap = preloadedSeries;
+        } else {
+            seriesMap = new LinkedHashMap<>();
+            for (AlpacaClient.Timeframe tf : TIMEFRAMES) {
+                try {
+                    seriesMap.put(tf, alpaca.getBars(normalizedTicker, tf));
+                } catch (Exception e) {
+                    log.warn("Could not fetch {} {} bars: {}", normalizedTicker, tf.displayName, e.getMessage());
+                }
             }
         }
 
         if (seriesMap.isEmpty()) {
             String msg = "❌ Could not fetch any price data for **" + normalizedTicker + "**. " +
                          "Check the ticker symbol and try again.";
-            return new AnalysisResult(msg, List.of());
+            return new AnalysisResult(msg, List.of(), Map.of());
         }
 
         // Step 2: Rules engine generates candidate setups per timeframe
@@ -95,7 +111,32 @@ public class AnalysisService {
         String fundamentalSummary  = fundFuture.join();
 
         String text = buildResponse(normalizedTicker, seriesMap, finalIdeas, fundamentalSummary);
-        return new AnalysisResult(text, finalIdeas);
+        return new AnalysisResult(text, finalIdeas, seriesMap);
+    }
+
+    /**
+     * Batch-fetches bars for all stock symbols across all timeframes in one request per timeframe.
+     * Returns a map of symbol -> (timeframe -> BarSeries) for use with runFullAnalysis(ticker, preloaded).
+     * Crypto symbols are excluded — they are fetched individually.
+     */
+    public Map<String, Map<AlpacaClient.Timeframe, BarSeries>> prefetchStockBars(List<String> tickers) {
+        List<String> stockTickers = tickers.stream()
+                .filter(t -> !AlpacaClient.isCrypto(t))
+                .toList();
+        if (stockTickers.isEmpty()) return Map.of();
+
+        Map<String, Map<AlpacaClient.Timeframe, BarSeries>> result = new LinkedHashMap<>();
+        for (String sym : stockTickers) result.put(sym, new LinkedHashMap<>());
+
+        for (AlpacaClient.Timeframe tf : TIMEFRAMES) {
+            try {
+                Map<String, BarSeries> batch = alpaca.getStockBarsBatch(stockTickers, tf);
+                batch.forEach((sym, series) -> result.get(sym).put(tf, series));
+            } catch (Exception e) {
+                log.warn("Batch bar fetch failed for timeframe {}: {}", tf.displayName, e.getMessage());
+            }
+        }
+        return result;
     }
 
     /**
@@ -121,23 +162,6 @@ public class AnalysisService {
         }
         sb.append("\nReply `!pick N qty=10` to place as a bracket order.");
         return sb.toString();
-    }
-
-    /**
-     * Returns the bar series map for a ticker (used by DiscordListener for chart rendering).
-     */
-    public Map<AlpacaClient.Timeframe, BarSeries> fetchSeriesMap(String ticker) {
-        String normalizedTicker = AlpacaClient.isCrypto(ticker)
-                ? AlpacaClient.normalizeCryptoTicker(ticker) : ticker;
-        Map<AlpacaClient.Timeframe, BarSeries> seriesMap = new LinkedHashMap<>();
-        for (AlpacaClient.Timeframe tf : TIMEFRAMES) {
-            try {
-                seriesMap.put(tf, alpaca.getBars(normalizedTicker, tf));
-            } catch (Exception e) {
-                log.warn("Could not fetch {} {} bars: {}", normalizedTicker, tf.displayName, e.getMessage());
-            }
-        }
-        return seriesMap;
     }
 
     private String buildResponse(String ticker,
