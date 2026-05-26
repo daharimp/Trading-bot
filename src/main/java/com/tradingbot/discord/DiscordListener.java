@@ -183,7 +183,7 @@ public class DiscordListener {
 
         byte[] chart = null;
         try {
-            Map<AlpacaClient.Timeframe, BarSeries> seriesMap = analysisService.fetchSeriesMap(ticker);
+            Map<AlpacaClient.Timeframe, BarSeries> seriesMap = result.seriesMap();
             BarSeries series = seriesMap.getOrDefault(AlpacaClient.Timeframe.H1,
                     seriesMap.isEmpty() ? null : seriesMap.values().iterator().next());
             if (series != null) {

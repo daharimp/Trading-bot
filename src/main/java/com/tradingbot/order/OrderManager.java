@@ -11,9 +11,11 @@ public class OrderManager {
     private static final Logger log = LoggerFactory.getLogger(OrderManager.class);
 
     private final AlpacaClient alpaca;
+    private final SlippageTracker slippageTracker;
 
-    public OrderManager(AlpacaClient alpaca) {
+    public OrderManager(AlpacaClient alpaca, SlippageTracker slippageTracker) {
         this.alpaca = alpaca;
+        this.slippageTracker = slippageTracker;
     }
 
     /**
@@ -53,6 +55,7 @@ public class OrderManager {
                 String.format("%.2f", target));
 
         String orderId = alpaca.placeOrder(ticker, side, entry, stop, target, qty);
+        slippageTracker.record(orderId, ticker, side, entry);
 
         return String.format("""
                 ✅ **Bracket Order Placed**
@@ -68,6 +71,56 @@ public class OrderManager {
                 ticker.toUpperCase(), direction.toUpperCase(),
                 entry, stop, target, qty, rr,
                 orderId, orderId);
+    }
+
+    /**
+     * Places a bracket order using time_in_force=opg (limit-on-open).
+     * Used by the overnight scheduler so the entry happens in the opening auction.
+     */
+    public String placePlayOpg(String ticker, String direction, double entry,
+                                double stop, double target, int qty) throws Exception {
+        String side = direction.equalsIgnoreCase("LONG") ? "buy" : "sell";
+
+        if (qty <= 0) return "❌ Quantity must be greater than 0.";
+        if (entry <= 0 || stop <= 0 || target <= 0)
+            return "❌ Entry, stop, and target must all be positive values.";
+
+        if (side.equals("buy")) {
+            if (stop >= entry)   return "❌ For a LONG trade, stop must be *below* entry.";
+            if (target <= entry) return "❌ For a LONG trade, target must be *above* entry.";
+        } else {
+            if (stop <= entry)   return "❌ For a SHORT trade, stop must be *above* entry.";
+            if (target >= entry) return "❌ For a SHORT trade, target must be *below* entry.";
+        }
+
+        double risk   = Math.abs(entry - stop);
+        double reward = Math.abs(target - entry);
+        double rr     = reward / risk;
+        if (rr < 1.0)
+            return String.format("❌ R:R is %.2f — too low. Minimum is 1.0.", rr);
+
+        log.info("Placing {} OPG bracket order: {} {} @ {}, stop {}, target {}",
+                direction, qty, ticker,
+                String.format("%.2f", entry),
+                String.format("%.2f", stop),
+                String.format("%.2f", target));
+
+        String orderId = alpaca.placeOrder(ticker, side, entry, stop, target, qty, "opg");
+        slippageTracker.record(orderId, ticker, side, entry);
+
+        return String.format("""
+                ✅ **OPG Bracket Order Placed** *(opening auction)*
+                • Ticker: **%s** | Direction: **%s**
+                • Entry (limit-on-open): $%.2f
+                • Stop loss:             $%.2f
+                • Take profit:           $%.2f
+                • Qty: %d shares | R:R %.2f
+                • Order ID: `%s`
+
+                Use `!cancel %s` to cancel before market open.
+                """,
+                ticker.toUpperCase(), direction.toUpperCase(),
+                entry, stop, target, qty, rr, orderId, orderId);
     }
 
     /** Returns formatted open positions for Discord. */
