@@ -10,6 +10,7 @@ import com.tradingbot.discord.DiscordNotifier;
 import com.tradingbot.discord.SessionStore;
 import com.tradingbot.fundamental.FundamentalDataClient;
 import com.tradingbot.order.OrderManager;
+import com.tradingbot.order.SlippageTracker;
 import com.tradingbot.scheduler.WatchlistScheduler;
 import discord4j.core.DiscordClient;
 import discord4j.core.GatewayDiscordClient;
@@ -37,16 +38,18 @@ public class Main {
         String alpacaMode       = env.get("ALPACA_MODE", "paper");
         String channelName      = env.get("DISCORD_CHANNEL_NAME", "");
         String fundamentalModel = env.get("FUNDAMENTAL_LLM_MODEL", "tencent/hunyuan-3-preview");
-        String technicalModel   = env.get("TECHNICAL_LLM_MODEL", "claude-sonnet-4-6");
+        String technicalModel   = env.get("TECHNICAL_LLM_MODEL", "mistralai/mistral-small-3.2-24b-instruct");
         String scheduleTime     = env.get("ANALYSIS_SCHEDULE_TIME", "23:00");
         int defaultQty          = Integer.parseInt(env.get("DEFAULT_QTY", "1"));
 
         AlpacaClient alpaca           = new AlpacaClient(alpacaKey, alpacaSecret, alpacaMode);
         FundamentalDataClient fdClient = new FundamentalDataClient(alphaVantageKey);
-        TechnicalAnalyst techAnalyst  = new TechnicalAnalyst(anthropicKey, technicalModel);
+        TechnicalAnalyst techAnalyst  = new TechnicalAnalyst(anthropicKey, openRouterKey, technicalModel);
         FundamentalAnalyst fundAnalyst = new FundamentalAnalyst(openRouterKey, fundamentalModel);
         AnalysisService analysisService = new AnalysisService(alpaca, techAnalyst, fundAnalyst, fdClient);
-        OrderManager orderManager     = new OrderManager(alpaca);
+        SlippageTracker slippageTracker = alpaca.newSlippageTracker();
+        slippageTracker.start();
+        OrderManager orderManager     = new OrderManager(alpaca, slippageTracker);
         ChartRenderer chartRenderer   = new ChartRenderer();
 
         log.info("Starting Trading Bot (Alpaca: {} | Technical: {} | Fundamental: {} | Schedule: {}ET)",
@@ -69,7 +72,7 @@ public class Main {
         DiscordNotifier notifier = new DiscordNotifier(gateway, channelName);
         SessionStore sessionStore = new SessionStore();
         WatchlistScheduler scheduler = new WatchlistScheduler(
-                notifier, analysisService, orderManager, scheduleTime, defaultQty);
+                notifier, alpaca, analysisService, orderManager, scheduleTime, defaultQty);
         scheduler.start();
 
         DiscordListener listener = new DiscordListener(
@@ -81,6 +84,7 @@ public class Main {
         gateway.onDisconnect().block();
 
         scheduler.shutdown();
+        slippageTracker.shutdown();
     }
 
     private static String requireEnv(Dotenv env, String key) {

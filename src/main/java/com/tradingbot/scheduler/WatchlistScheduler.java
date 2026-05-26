@@ -1,11 +1,13 @@
 package com.tradingbot.scheduler;
 
+import com.tradingbot.alpaca.AlpacaClient;
 import com.tradingbot.analysis.AnalysisService;
 import com.tradingbot.discord.DiscordNotifier;
 import com.tradingbot.model.TradeIdea;
 import com.tradingbot.order.OrderManager;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.ta4j.core.BarSeries;
 
 import java.time.LocalTime;
 import java.time.ZoneId;
@@ -24,7 +26,10 @@ public class WatchlistScheduler {
     private static final Logger log = LoggerFactory.getLogger(WatchlistScheduler.class);
     private static final ZoneId ET = ZoneId.of("America/New_York");
 
+    private static final double GAP_THRESHOLD = 0.01; // 1% gap triggers skip
+
     private final DiscordNotifier notifier;
+    private final AlpacaClient alpaca;
     private final AnalysisService analysisService;
     private final OrderManager orderManager;
     private final String scheduleTime;
@@ -39,9 +44,11 @@ public class WatchlistScheduler {
         return t;
     });
 
-    public WatchlistScheduler(DiscordNotifier notifier, AnalysisService analysisService,
-                               OrderManager orderManager, String scheduleTime, int defaultQty) {
+    public WatchlistScheduler(DiscordNotifier notifier, AlpacaClient alpaca,
+                               AnalysisService analysisService, OrderManager orderManager,
+                               String scheduleTime, int defaultQty) {
         this.notifier        = notifier;
+        this.alpaca          = alpaca;
         this.analysisService = analysisService;
         this.orderManager    = orderManager;
         this.scheduleTime    = scheduleTime;
@@ -99,10 +106,16 @@ public class WatchlistScheduler {
         notifier.postMessage("🌙 **Overnight Analysis Starting** — " + tickers.size()
                 + " ticker(s): " + String.join(", ", getWatchlist()));
 
+        // Batch-fetch all stock bars upfront (5 requests total instead of 5 × n)
+        log.info("Batch-fetching bars for stock tickers");
+        Map<String, Map<AlpacaClient.Timeframe, BarSeries>> batchedBars =
+                analysisService.prefetchStockBars(tickers);
+
         for (String ticker : tickers) {
             try {
                 log.info("Analyzing {}", ticker);
-                AnalysisService.AnalysisResult result = analysisService.runFullAnalysis(ticker);
+                Map<AlpacaClient.Timeframe, BarSeries> preloaded = batchedBars.get(ticker);
+                AnalysisService.AnalysisResult result = analysisService.runFullAnalysis(ticker, preloaded);
 
                 notifier.postMessage(result.text());
 
@@ -130,6 +143,20 @@ public class WatchlistScheduler {
     }
 
     private void autoPlace(String ticker, List<TradeIdea> ideas) {
+        if (AlpacaClient.isCrypto(ticker)) {
+            // Crypto gap-check requires Kraken quotes (M1) — skip for now
+            autoPlaceWithTif(ticker, ideas, "gtc");
+            return;
+        }
+
+        // Fetch a fresh quote to check for overnight gap
+        AlpacaClient.Quote quote = null;
+        try {
+            quote = alpaca.getLatestQuote(ticker);
+        } catch (Exception e) {
+            log.warn("Gap-check quote fetch failed for {}: {} — proceeding without gap check", ticker, e.getMessage());
+        }
+
         List<TradeIdea> highConviction = ideas.stream()
                 .filter(i -> i.getConviction() == TradeIdea.Conviction.HIGH)
                 .toList();
@@ -141,13 +168,47 @@ public class WatchlistScheduler {
 
         for (TradeIdea idea : highConviction) {
             try {
-                String confirmation = orderManager.placePlay(
+                if (quote != null) {
+                    double gap = Math.abs(quote.mid() - idea.getEntry()) / idea.getEntry();
+                    if (gap > GAP_THRESHOLD) {
+                        log.info("skipped_gap_check: {} gap={}% entry={} mid={}",
+                                ticker, String.format("%.1f", gap * 100), idea.getEntry(), quote.mid());
+                        notifier.postMessage(String.format(
+                                "⏭️ **AUTO-PLAY SKIPPED** (%s): %.1f%% overnight gap (entry $%.2f vs mid $%.2f). " +
+                                "Review manually: 👆",
+                                ticker, gap * 100, idea.getEntry(), quote.mid()));
+                        continue;
+                    }
+                }
+
+                String confirmation = orderManager.placePlayOpg(
                         idea.getTicker(),
                         idea.getDirection().name(),
                         idea.getEntry(),
                         idea.getStopLoss(),
                         idea.getTarget(),
                         defaultQty);
+                notifier.postMessage("🤖 **AUTO-PLAY** " + confirmation);
+            } catch (Exception e) {
+                log.error("Auto-play order failed for {}: {}", ticker, e.getMessage());
+                notifier.postMessage("⚠️ Auto-play failed for **" + ticker + "**: " + e.getMessage());
+            }
+        }
+    }
+
+    private void autoPlaceWithTif(String ticker, List<TradeIdea> ideas, String tif) {
+        List<TradeIdea> highConviction = ideas.stream()
+                .filter(i -> i.getConviction() == TradeIdea.Conviction.HIGH)
+                .toList();
+        if (highConviction.isEmpty()) {
+            notifier.postMessage("🤖 **AUTO-PLAY** (" + ticker + "): No HIGH conviction setups to place.");
+            return;
+        }
+        for (TradeIdea idea : highConviction) {
+            try {
+                String confirmation = orderManager.placePlay(
+                        idea.getTicker(), idea.getDirection().name(),
+                        idea.getEntry(), idea.getStopLoss(), idea.getTarget(), defaultQty);
                 notifier.postMessage("🤖 **AUTO-PLAY** " + confirmation);
             } catch (Exception e) {
                 log.error("Auto-play order failed for {}: {}", ticker, e.getMessage());

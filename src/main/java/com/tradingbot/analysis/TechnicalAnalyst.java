@@ -25,6 +25,7 @@ public class TechnicalAnalyst {
 
     private static final String ANTHROPIC_URL = "https://api.anthropic.com/v1/messages";
     private static final String ANTHROPIC_VERSION = "2023-06-01";
+    private static final String OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
     private static final MediaType JSON = MediaType.parse("application/json");
     private static final int MAX_TOKENS = 2000;
 
@@ -66,12 +67,18 @@ public class TechnicalAnalyst {
             """;
 
     private final OkHttpClient http;
-    private final String apiKey;
+    private final String anthropicKey;
+    private final String openRouterKey;
     private final String model;
 
-    public TechnicalAnalyst(String anthropicApiKey, String model) {
-        this.apiKey = anthropicApiKey;
+    // True when the model string looks like an OpenRouter model (contains "/")
+    private final boolean useOpenRouter;
+
+    public TechnicalAnalyst(String anthropicKey, String openRouterKey, String model) {
+        this.anthropicKey = anthropicKey;
+        this.openRouterKey = openRouterKey;
         this.model = model;
+        this.useOpenRouter = model.contains("/");
         this.http = new OkHttpClient.Builder()
                 .callTimeout(Duration.ofSeconds(120))
                 .readTimeout(Duration.ofSeconds(120))
@@ -86,7 +93,7 @@ public class TechnicalAnalyst {
         String userPrompt = buildUserPrompt(ticker, seriesMap, candidatesByTimeframe);
 
         try {
-            String response = callAnthropic(userPrompt);
+            String response = callLlm(userPrompt);
 
             if (response.equals("NO_SETUPS") || response.isBlank()) {
                 return List.of();
@@ -100,6 +107,10 @@ public class TechnicalAnalyst {
                     .flatMap(List::stream)
                     .toList();
         }
+    }
+
+    private String callLlm(String userPrompt) throws Exception {
+        return useOpenRouter ? callOpenRouter(userPrompt) : callAnthropic(userPrompt);
     }
 
     private String callAnthropic(String userPrompt) throws Exception {
@@ -117,7 +128,7 @@ public class TechnicalAnalyst {
 
         Request request = new Request.Builder()
                 .url(ANTHROPIC_URL)
-                .header("x-api-key", apiKey)
+                .header("x-api-key", anthropicKey)
                 .header("anthropic-version", ANTHROPIC_VERSION)
                 .header("content-type", "application/json")
                 .post(RequestBody.create(body.toString(), JSON))
@@ -139,6 +150,46 @@ public class TechnicalAnalyst {
                 }
             }
             return text.toString().trim();
+        }
+    }
+
+    private String callOpenRouter(String userPrompt) throws Exception {
+        JsonObject body = new JsonObject();
+        body.addProperty("model", model);
+        body.addProperty("max_tokens", MAX_TOKENS);
+
+        JsonArray messages = new JsonArray();
+        JsonObject sysMsg = new JsonObject();
+        sysMsg.addProperty("role", "system");
+        sysMsg.addProperty("content", SYSTEM_PROMPT);
+        messages.add(sysMsg);
+        JsonObject userMsg = new JsonObject();
+        userMsg.addProperty("role", "user");
+        userMsg.addProperty("content", userPrompt);
+        messages.add(userMsg);
+        body.add("messages", messages);
+
+        Request request = new Request.Builder()
+                .url(OPENROUTER_URL)
+                .header("Authorization", "Bearer " + openRouterKey)
+                .header("content-type", "application/json")
+                .post(RequestBody.create(body.toString(), JSON))
+                .build();
+
+        try (Response resp = http.newCall(request).execute()) {
+            ResponseBody respBody = resp.body();
+            String raw = respBody != null ? respBody.string() : "";
+            if (!resp.isSuccessful()) {
+                throw new RuntimeException("OpenRouter API error " + resp.code() + ": " + raw);
+            }
+            JsonObject json = JsonParser.parseString(raw).getAsJsonObject();
+            JsonArray choices = json.getAsJsonArray("choices");
+            if (choices == null || choices.isEmpty()) {
+                throw new RuntimeException("OpenRouter returned no choices: " + raw);
+            }
+            return choices.get(0).getAsJsonObject()
+                    .getAsJsonObject("message")
+                    .get("content").getAsString().trim();
         }
     }
 
