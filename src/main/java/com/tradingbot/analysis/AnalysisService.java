@@ -37,6 +37,7 @@ public class AnalysisService {
     private final FundamentalAnalyst fundAnalyst;
     private final FundamentalDataClient fdClient;
     private final TradeIdeaGenerator rulesEngine;
+    private KrakenClient kraken;
 
     public AnalysisService(AlpacaClient alpaca, TechnicalAnalyst techAnalyst,
                             FundamentalAnalyst fundAnalyst, FundamentalDataClient fdClient) {
@@ -45,6 +46,11 @@ public class AnalysisService {
         this.fundAnalyst = fundAnalyst;
         this.fdClient    = fdClient;
         this.rulesEngine = new TradeIdeaGenerator();
+    }
+
+    /** Injects the Kraken client for crypto bar pre-fetching. Call once after construction. */
+    public void setKrakenClient(KrakenClient krakenClient) {
+        this.kraken = krakenClient;
     }
 
     /**
@@ -115,25 +121,38 @@ public class AnalysisService {
     }
 
     /**
-     * Batch-fetches bars for all stock symbols across all timeframes in one request per timeframe.
-     * Returns a map of symbol -> (timeframe -> BarSeries) for use with runFullAnalysis(ticker, preloaded).
-     * Crypto symbols are excluded — they are fetched individually.
+     * Batch-fetches bars for all tickers across all timeframes.
+     * Stocks use Alpaca's multi-symbol endpoint (one request per timeframe).
+     * Crypto uses KrakenClient if wired, otherwise falls back to Alpaca's crypto endpoint.
+     * Returns symbol -> (timeframe -> BarSeries) for use with runFullAnalysis(ticker, preloaded).
      */
     public Map<String, Map<AlpacaClient.Timeframe, BarSeries>> prefetchStockBars(List<String> tickers) {
-        List<String> stockTickers = tickers.stream()
-                .filter(t -> !AlpacaClient.isCrypto(t))
-                .toList();
-        if (stockTickers.isEmpty()) return Map.of();
+        List<String> stockTickers  = tickers.stream().filter(t -> !AlpacaClient.isCrypto(t)).toList();
+        List<String> cryptoTickers = tickers.stream().filter(AlpacaClient::isCrypto).toList();
 
         Map<String, Map<AlpacaClient.Timeframe, BarSeries>> result = new LinkedHashMap<>();
-        for (String sym : stockTickers) result.put(sym, new LinkedHashMap<>());
+        for (String sym : tickers) result.put(sym, new LinkedHashMap<>());
 
+        // Stock batch: one multi-symbol request per timeframe
         for (AlpacaClient.Timeframe tf : TIMEFRAMES) {
-            try {
-                Map<String, BarSeries> batch = alpaca.getStockBarsBatch(stockTickers, tf);
-                batch.forEach((sym, series) -> result.get(sym).put(tf, series));
-            } catch (Exception e) {
-                log.warn("Batch bar fetch failed for timeframe {}: {}", tf.displayName, e.getMessage());
+            if (!stockTickers.isEmpty()) {
+                try {
+                    Map<String, BarSeries> batch = alpaca.getStockBarsBatch(stockTickers, tf);
+                    batch.forEach((sym, series) -> result.get(sym).put(tf, series));
+                } catch (Exception e) {
+                    log.warn("Stock batch bar fetch failed for {}: {}", tf.displayName, e.getMessage());
+                }
+            }
+            // Crypto: individual requests via Kraken (or Alpaca fallback)
+            for (String sym : cryptoTickers) {
+                try {
+                    BarSeries series = kraken != null
+                            ? kraken.getBars(sym, tf)
+                            : alpaca.getBars(sym, tf);
+                    result.get(sym).put(tf, series);
+                } catch (Exception e) {
+                    log.warn("Crypto bar fetch failed for {} {}: {}", sym, tf.displayName, e.getMessage());
+                }
             }
         }
         return result;

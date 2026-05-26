@@ -30,8 +30,8 @@ public class TechnicalAnalyst {
     private static final int MAX_TOKENS = 2000;
 
     private static final String SYSTEM_PROMPT = """
-            You are an expert equities trader and technical analyst with 15 years of experience
-            in day trading and swing trading. You will receive:
+            You are an expert trader and technical analyst with 15 years of experience
+            in day trading and swing trading across equities and crypto assets. You will receive:
             1. A summary of technical indicator values across multiple timeframes for a given ticker.
             2. A list of candidate trade setups identified by a rules-based engine.
 

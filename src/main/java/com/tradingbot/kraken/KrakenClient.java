@@ -157,11 +157,11 @@ public class KrakenClient {
     // ── Order placement (private, HMAC-SHA512 signed) ────────────────────────────
 
     /**
-     * Places a bracket-style order on Kraken.
-     * Kraken doesn't have a native bracket order type, so we place:
-     *   1. A limit entry order with a conditional close (stop-loss + take-profit).
+     * Places a bracket-style order on Kraken as two separate signed requests:
+     *   1. A GTC limit entry order with a conditional stop-loss-limit close.
+     *   2. A separate GTC limit order at the take-profit target (opposite side).
      * direction: "LONG" or "SHORT"
-     * Returns the Kraken transaction ID (txid).
+     * Returns "entryTxid/tpTxid" — both IDs joined with "/".
      */
     public String placeOrder(String ticker, String direction, double entry,
                               double stop, double target, int qty) throws Exception {
@@ -169,35 +169,49 @@ public class KrakenClient {
             throw new IllegalStateException("Kraken order placement requires KRAKEN_API_KEY and KRAKEN_API_SECRET");
         }
 
-        String pair = toKrakenPair(ticker);
-        String type = direction.equalsIgnoreCase("LONG") ? "buy" : "sell";
+        String pair     = toKrakenPair(ticker);
+        String entryType = direction.equalsIgnoreCase("LONG") ? "buy" : "sell";
+        String tpType    = direction.equalsIgnoreCase("LONG") ? "sell" : "buy";
 
-        log.info("Placing Kraken {} order: {} {} @ {} stop {} target {}",
+        log.info("Placing Kraken {} bracket: {} {} @ {} stop {} target {}",
                 direction, qty, pair,
                 String.format("%.8f", entry),
                 String.format("%.8f", stop),
                 String.format("%.8f", target));
 
+        String entryTxid = addOrder(pair, entryType, qty, entry, stop);
+        String tpTxid    = addOrder(pair, tpType,    qty, target, 0);
+
+        return entryTxid + "/" + tpTxid;
+    }
+
+    /** Sends a single AddOrder request. If stop > 0 a conditional stop-loss-limit close is attached. */
+    private String addOrder(String pair, String type, int qty, double price, double stop) throws Exception {
         String nonce = String.valueOf(System.currentTimeMillis());
-        String postData = "nonce=" + nonce
-                + "&ordertype=limit"
-                + "&type=" + type
-                + "&volume=" + qty
-                + "&pair=" + URLEncoder.encode(pair, StandardCharsets.UTF_8)
-                + "&price=" + String.format("%.8f", entry)
-                + "&close%5Bordertype%5D=stop-loss-limit"
-                + "&close%5Bprice%5D=" + String.format("%.8f", stop)
-                + "&close%5Bprice2%5D=" + String.format("%.8f", stop)  // limit offset for stop-loss-limit
-                + "&timeinforce=GTC";
+        StringBuilder pd = new StringBuilder()
+                .append("nonce=").append(nonce)
+                .append("&ordertype=limit")
+                .append("&type=").append(type)
+                .append("&volume=").append(qty)
+                .append("&pair=").append(URLEncoder.encode(pair, StandardCharsets.UTF_8))
+                .append("&price=").append(String.format("%.8f", price))
+                .append("&timeinforce=GTC");
+
+        if (stop > 0) {
+            pd.append("&close%5Bordertype%5D=stop-loss-limit")
+              .append("&close%5Bprice%5D=").append(String.format("%.8f", stop))
+              .append("&close%5Bprice2%5D=").append(String.format("%.8f", stop));
+        }
 
         String path = "/0/private/AddOrder";
-        String signature = sign(path, nonce, postData);
+        String sig  = sign(path, nonce, pd.toString());
 
         Request request = new Request.Builder()
                 .url(BASE + path)
                 .addHeader("API-Key", apiKey)
-                .addHeader("API-Sign", signature)
-                .post(RequestBody.create(postData, okhttp3.MediaType.get("application/x-www-form-urlencoded")))
+                .addHeader("API-Sign", sig)
+                .post(RequestBody.create(pd.toString(),
+                        okhttp3.MediaType.get("application/x-www-form-urlencoded")))
                 .build();
 
         try (Response response = http.newCall(request).execute()) {
@@ -210,9 +224,7 @@ public class KrakenClient {
             if (errors != null && errors.size() > 0) {
                 throw new IOException("Kraken order error: " + errors);
             }
-            JsonObject result = root.getAsJsonObject("result");
-            JsonArray txids = result.getAsJsonArray("txid");
-            return txids.get(0).getAsString();
+            return root.getAsJsonObject("result").getAsJsonArray("txid").get(0).getAsString();
         }
     }
 

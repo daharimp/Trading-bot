@@ -9,9 +9,11 @@ import com.tradingbot.discord.DiscordListener;
 import com.tradingbot.discord.DiscordNotifier;
 import com.tradingbot.discord.SessionStore;
 import com.tradingbot.fundamental.FundamentalDataClient;
+import com.tradingbot.kraken.KrakenClient;
 import com.tradingbot.order.OrderManager;
 import com.tradingbot.order.SlippageTracker;
 import com.tradingbot.scheduler.WatchlistScheduler;
+import okhttp3.OkHttpClient;
 import discord4j.core.DiscordClient;
 import discord4j.core.GatewayDiscordClient;
 import discord4j.core.event.domain.message.MessageCreateEvent;
@@ -41,15 +43,21 @@ public class Main {
         String technicalModel   = env.get("TECHNICAL_LLM_MODEL", "mistralai/mistral-small-3.2-24b-instruct");
         String scheduleTime     = env.get("ANALYSIS_SCHEDULE_TIME", "23:00");
         int defaultQty          = Integer.parseInt(env.get("DEFAULT_QTY", "1"));
+        String krakenKey        = env.get("KRAKEN_API_KEY", "");
+        String krakenSecret     = env.get("KRAKEN_API_SECRET", "");
 
         AlpacaClient alpaca           = new AlpacaClient(alpacaKey, alpacaSecret, alpacaMode);
+        KrakenClient kraken           = new KrakenClient(new OkHttpClient(), krakenKey, krakenSecret);
+        alpaca.setKrakenClient(kraken);
         FundamentalDataClient fdClient = new FundamentalDataClient(alphaVantageKey);
         TechnicalAnalyst techAnalyst  = new TechnicalAnalyst(anthropicKey, openRouterKey, technicalModel);
         FundamentalAnalyst fundAnalyst = new FundamentalAnalyst(openRouterKey, fundamentalModel);
         AnalysisService analysisService = new AnalysisService(alpaca, techAnalyst, fundAnalyst, fdClient);
+        analysisService.setKrakenClient(kraken);
         SlippageTracker slippageTracker = alpaca.newSlippageTracker();
         slippageTracker.start();
         OrderManager orderManager     = new OrderManager(alpaca, slippageTracker);
+        orderManager.setKrakenClient(kraken);
         ChartRenderer chartRenderer   = new ChartRenderer();
 
         log.info("Starting Trading Bot (Alpaca: {} | Technical: {} | Fundamental: {} | Schedule: {}ET)",
@@ -73,6 +81,7 @@ public class Main {
         SessionStore sessionStore = new SessionStore();
         WatchlistScheduler scheduler = new WatchlistScheduler(
                 notifier, alpaca, analysisService, orderManager, scheduleTime, defaultQty);
+        scheduler.setKrakenClient(kraken);
         scheduler.start();
 
         DiscordListener listener = new DiscordListener(

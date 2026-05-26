@@ -3,6 +3,7 @@ package com.tradingbot.scheduler;
 import com.tradingbot.alpaca.AlpacaClient;
 import com.tradingbot.analysis.AnalysisService;
 import com.tradingbot.discord.DiscordNotifier;
+import com.tradingbot.kraken.KrakenClient;
 import com.tradingbot.model.TradeIdea;
 import com.tradingbot.order.OrderManager;
 import org.slf4j.Logger;
@@ -34,6 +35,12 @@ public class WatchlistScheduler {
     private final OrderManager orderManager;
     private final String scheduleTime;
     private final int defaultQty;
+    private KrakenClient kraken;
+
+    /** Injects the Kraken client for crypto gap-checks at auto-play time. */
+    public void setKrakenClient(KrakenClient krakenClient) {
+        this.kraken = krakenClient;
+    }
 
     // key = ticker (normalized upper), value = autoPlay flag
     private final Map<String, Boolean> watchlist = new ConcurrentHashMap<>();
@@ -143,16 +150,18 @@ public class WatchlistScheduler {
     }
 
     private void autoPlace(String ticker, List<TradeIdea> ideas) {
-        if (AlpacaClient.isCrypto(ticker)) {
-            // Crypto gap-check requires Kraken quotes (M1) — skip for now
-            autoPlaceWithTif(ticker, ideas, "gtc");
-            return;
-        }
+        boolean crypto = AlpacaClient.isCrypto(ticker);
 
-        // Fetch a fresh quote to check for overnight gap
-        AlpacaClient.Quote quote = null;
+        // Fetch a fresh quote for overnight gap-check (Kraken for crypto, Alpaca for stocks)
+        double mid = 0;
         try {
-            quote = alpaca.getLatestQuote(ticker);
+            if (crypto && kraken != null) {
+                KrakenClient.Quote q = kraken.getLatestQuote(ticker);
+                if (q != null) mid = q.mid();
+            } else if (!crypto) {
+                AlpacaClient.Quote q = alpaca.getLatestQuote(ticker);
+                if (q != null) mid = q.mid();
+            }
         } catch (Exception e) {
             log.warn("Gap-check quote fetch failed for {}: {} — proceeding without gap check", ticker, e.getMessage());
         }
@@ -168,15 +177,15 @@ public class WatchlistScheduler {
 
         for (TradeIdea idea : highConviction) {
             try {
-                if (quote != null) {
-                    double gap = Math.abs(quote.mid() - idea.getEntry()) / idea.getEntry();
+                if (mid > 0) {
+                    double gap = Math.abs(mid - idea.getEntry()) / idea.getEntry();
                     if (gap > GAP_THRESHOLD) {
                         log.info("skipped_gap_check: {} gap={}% entry={} mid={}",
-                                ticker, String.format("%.1f", gap * 100), idea.getEntry(), quote.mid());
+                                ticker, String.format("%.1f", gap * 100), idea.getEntry(), mid);
                         notifier.postMessage(String.format(
                                 "⏭️ **AUTO-PLAY SKIPPED** (%s): %.1f%% overnight gap (entry $%.2f vs mid $%.2f). " +
                                 "Review manually: 👆",
-                                ticker, gap * 100, idea.getEntry(), quote.mid()));
+                                ticker, gap * 100, idea.getEntry(), mid));
                         continue;
                     }
                 }
@@ -188,27 +197,6 @@ public class WatchlistScheduler {
                         idea.getStopLoss(),
                         idea.getTarget(),
                         defaultQty);
-                notifier.postMessage("🤖 **AUTO-PLAY** " + confirmation);
-            } catch (Exception e) {
-                log.error("Auto-play order failed for {}: {}", ticker, e.getMessage());
-                notifier.postMessage("⚠️ Auto-play failed for **" + ticker + "**: " + e.getMessage());
-            }
-        }
-    }
-
-    private void autoPlaceWithTif(String ticker, List<TradeIdea> ideas, String tif) {
-        List<TradeIdea> highConviction = ideas.stream()
-                .filter(i -> i.getConviction() == TradeIdea.Conviction.HIGH)
-                .toList();
-        if (highConviction.isEmpty()) {
-            notifier.postMessage("🤖 **AUTO-PLAY** (" + ticker + "): No HIGH conviction setups to place.");
-            return;
-        }
-        for (TradeIdea idea : highConviction) {
-            try {
-                String confirmation = orderManager.placePlay(
-                        idea.getTicker(), idea.getDirection().name(),
-                        idea.getEntry(), idea.getStopLoss(), idea.getTarget(), defaultQty);
                 notifier.postMessage("🤖 **AUTO-PLAY** " + confirmation);
             } catch (Exception e) {
                 log.error("Auto-play order failed for {}: {}", ticker, e.getMessage());
