@@ -1,6 +1,7 @@
 package com.tradingbot.order;
 
 import com.tradingbot.alpaca.AlpacaClient;
+import com.tradingbot.db.OrderDao;
 import com.tradingbot.kraken.KrakenClient;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -13,11 +14,13 @@ public class OrderManager {
 
     private final AlpacaClient alpaca;
     private final SlippageTracker slippageTracker;
+    private final OrderDao orderDao;
     private KrakenClient kraken;
 
-    public OrderManager(AlpacaClient alpaca, SlippageTracker slippageTracker) {
+    public OrderManager(AlpacaClient alpaca, SlippageTracker slippageTracker, OrderDao orderDao) {
         this.alpaca = alpaca;
         this.slippageTracker = slippageTracker;
+        this.orderDao = orderDao;
     }
 
     public void setKrakenClient(KrakenClient krakenClient) {
@@ -66,6 +69,7 @@ public class OrderManager {
 
         String orderId = alpaca.placeOrder(ticker, side, entry, stop, target, qty);
         slippageTracker.record(orderId, ticker, side, entry);
+        orderDao.recordAlpacaOrder(ticker, direction, entry, stop, target, qty, orderId, "day");
 
         return String.format("""
                 ✅ **Bracket Order Placed**
@@ -122,6 +126,7 @@ public class OrderManager {
 
         String orderId = alpaca.placeOrder(ticker, side, entry, stop, target, qty, "opg");
         slippageTracker.record(orderId, ticker, side, entry);
+        orderDao.recordAlpacaOrder(ticker, direction, entry, stop, target, qty, orderId, "opg");
 
         return String.format("""
                 ✅ **OPG Bracket Order Placed** *(opening auction)*
@@ -151,6 +156,7 @@ public class OrderManager {
         String tpTxid    = parts.length > 1 ? parts[1] : "n/a";
 
         slippageTracker.record(entryTxid, ticker, direction.equalsIgnoreCase("LONG") ? "buy" : "sell", entry);
+        orderDao.recordKrakenOrder(ticker, direction, entry, stop, target, qty, entryTxid, tpTxid);
 
         return String.format("""
                 ✅ **Kraken Bracket Placed** *(crypto — 24/7)*
