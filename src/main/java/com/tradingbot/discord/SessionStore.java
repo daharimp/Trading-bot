@@ -1,24 +1,27 @@
 package com.tradingbot.discord;
 
+import com.tradingbot.db.SessionDao;
 import com.tradingbot.model.TradeIdea;
 
 import java.util.List;
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
 
 public class SessionStore {
 
-    private final Map<String, List<TradeIdea>> pendingSetups = new ConcurrentHashMap<>();
+    private final SessionDao dao;
+
+    public SessionStore(SessionDao dao) {
+        this.dao = dao;
+    }
 
     public void store(String channelId, List<TradeIdea> ideas) {
-        pendingSetups.put(channelId, ideas);
+        dao.store(channelId, ideas);
     }
 
     public List<TradeIdea> get(String channelId) {
-        return pendingSetups.get(channelId);
+        return dao.get(channelId);
     }
 
     public void clear(String channelId) {
-        pendingSetups.remove(channelId);
+        dao.clear(channelId);
     }
 }

@@ -16,6 +16,21 @@ Or the saved command: `/runtrading`.
 
 `dotenv-java` rejects duplicate keys — keep each variable defined exactly once.
 
+## Branch and Commit Workflow
+
+**For significant changes** (new features, milestone work, schema migrations, dependency additions):
+
+1. Always create a new branch before starting: `git checkout -b <short-descriptive-name>`
+2. Do the work and compile-verify on the branch
+3. **Ask before committing** — present a summary of what changed and a suggested commit message, then wait for approval before running `git commit`
+4. Never commit directly to `main` for non-trivial work
+
+**For trivial changes** (typo fixes, comment updates, `.env.example` docs):
+
+- May commit directly to `main` after asking
+
+"Significant" means: touches more than 2 files, adds/removes dependencies, changes a constructor signature, or is part of a named milestone (M0, M1, M2...).
+
 ## Deploy Configuration (configured by /setup-deploy)
 
 - Platform: container-ready, not yet deployed

@@ -2,6 +2,7 @@ package com.tradingbot.scheduler;
 
 import com.tradingbot.alpaca.AlpacaClient;
 import com.tradingbot.analysis.AnalysisService;
+import com.tradingbot.db.WatchlistDao;
 import com.tradingbot.discord.DiscordNotifier;
 import com.tradingbot.kraken.KrakenClient;
 import com.tradingbot.model.TradeIdea;
@@ -17,7 +18,6 @@ import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -33,6 +33,7 @@ public class WatchlistScheduler {
     private final AlpacaClient alpaca;
     private final AnalysisService analysisService;
     private final OrderManager orderManager;
+    private final WatchlistDao watchlistDao;
     private final String scheduleTime;
     private final int defaultQty;
     private KrakenClient kraken;
@@ -42,9 +43,6 @@ public class WatchlistScheduler {
         this.kraken = krakenClient;
     }
 
-    // key = ticker (normalized upper), value = autoPlay flag
-    private final Map<String, Boolean> watchlist = new ConcurrentHashMap<>();
-
     private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
         Thread t = new Thread(r, "watchlist-scheduler");
         t.setDaemon(true);
@@ -53,36 +51,38 @@ public class WatchlistScheduler {
 
     public WatchlistScheduler(DiscordNotifier notifier, AlpacaClient alpaca,
                                AnalysisService analysisService, OrderManager orderManager,
+                               WatchlistDao watchlistDao,
                                String scheduleTime, int defaultQty) {
         this.notifier        = notifier;
         this.alpaca          = alpaca;
         this.analysisService = analysisService;
         this.orderManager    = orderManager;
+        this.watchlistDao    = watchlistDao;
         this.scheduleTime    = scheduleTime;
         this.defaultQty      = defaultQty;
     }
 
     public void addTicker(String ticker, boolean autoPlay) {
-        watchlist.put(ticker.toUpperCase(), autoPlay);
+        watchlistDao.add(ticker, autoPlay);
     }
 
     public void removeTicker(String ticker) {
-        watchlist.remove(ticker.toUpperCase());
+        watchlistDao.remove(ticker);
     }
 
     /** Returns ticker strings for display, with (auto) suffix where applicable. */
     public List<String> getWatchlist() {
         List<String> entries = new ArrayList<>();
-        watchlist.forEach((ticker, auto) -> entries.add(auto ? ticker + " (auto)" : ticker));
+        watchlistDao.loadAll().forEach((ticker, auto) -> entries.add(auto ? ticker + " (auto)" : ticker));
         return entries;
     }
 
     public boolean isAutoPlay(String ticker) {
-        return Boolean.TRUE.equals(watchlist.get(ticker.toUpperCase()));
+        return watchlistDao.isAutoPlay(ticker);
     }
 
     public boolean isEmpty() {
-        return watchlist.isEmpty();
+        return watchlistDao.isEmpty();
     }
 
     /** Schedules the daily run at the configured ET time. */
@@ -103,7 +103,7 @@ public class WatchlistScheduler {
     }
 
     private void runAnalysis() {
-        List<String> tickers = new ArrayList<>(watchlist.keySet());
+        List<String> tickers = new ArrayList<>(watchlistDao.loadAll().keySet());
         if (tickers.isEmpty()) {
             log.info("Watchlist is empty — skipping scheduled analysis");
             return;
@@ -113,8 +113,6 @@ public class WatchlistScheduler {
         notifier.postMessage("🌙 **Overnight Analysis Starting** — " + tickers.size()
                 + " ticker(s): " + String.join(", ", getWatchlist()));
 
-        // Batch-fetch all stock bars upfront (5 requests total instead of 5 × n)
-        log.info("Batch-fetching bars for stock tickers");
         Map<String, Map<AlpacaClient.Timeframe, BarSeries>> batchedBars =
                 analysisService.prefetchStockBars(tickers);
 
@@ -135,7 +133,6 @@ public class WatchlistScheduler {
                     autoPlace(ticker, result.ideas());
                 }
 
-                // Space requests to respect Alpha Vantage rate limits
                 Thread.sleep(3000);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
@@ -152,7 +149,6 @@ public class WatchlistScheduler {
     private void autoPlace(String ticker, List<TradeIdea> ideas) {
         boolean crypto = AlpacaClient.isCrypto(ticker);
 
-        // Fetch a fresh quote for overnight gap-check (Kraken for crypto, Alpaca for stocks)
         double mid = 0;
         try {
             if (crypto && kraken != null) {
