@@ -5,6 +5,10 @@ import com.tradingbot.analysis.AnalysisService;
 import com.tradingbot.analysis.FundamentalAnalyst;
 import com.tradingbot.analysis.TechnicalAnalyst;
 import com.tradingbot.chart.ChartRenderer;
+import com.tradingbot.db.DatabaseManager;
+import com.tradingbot.db.OrderDao;
+import com.tradingbot.db.SessionDao;
+import com.tradingbot.db.WatchlistDao;
 import com.tradingbot.discord.DiscordListener;
 import com.tradingbot.discord.DiscordNotifier;
 import com.tradingbot.discord.SessionStore;
@@ -45,6 +49,12 @@ public class Main {
         int defaultQty          = Integer.parseInt(env.get("DEFAULT_QTY", "1"));
         String krakenKey        = env.get("KRAKEN_API_KEY", "");
         String krakenSecret     = env.get("KRAKEN_API_SECRET", "");
+        String dbPath           = env.get("DB_PATH", "./trading-bot.db");
+
+        DatabaseManager db      = new DatabaseManager(dbPath);
+        WatchlistDao watchlistDao = new WatchlistDao(db.jdbi());
+        SessionDao   sessionDao   = new SessionDao(db.jdbi());
+        OrderDao     orderDao     = new OrderDao(db.jdbi());
 
         AlpacaClient alpaca           = new AlpacaClient(alpacaKey, alpacaSecret, alpacaMode);
         KrakenClient kraken           = new KrakenClient(new OkHttpClient(), krakenKey, krakenSecret);
@@ -56,7 +66,7 @@ public class Main {
         analysisService.setKrakenClient(kraken);
         SlippageTracker slippageTracker = alpaca.newSlippageTracker();
         slippageTracker.start();
-        OrderManager orderManager     = new OrderManager(alpaca, slippageTracker);
+        OrderManager orderManager     = new OrderManager(alpaca, slippageTracker, orderDao);
         orderManager.setKrakenClient(kraken);
         ChartRenderer chartRenderer   = new ChartRenderer();
 
@@ -77,10 +87,10 @@ public class Main {
             System.exit(1);
         }
 
-        DiscordNotifier notifier = new DiscordNotifier(gateway, channelName);
-        SessionStore sessionStore = new SessionStore();
-        WatchlistScheduler scheduler = new WatchlistScheduler(
-                notifier, alpaca, analysisService, orderManager, scheduleTime, defaultQty);
+        DiscordNotifier notifier      = new DiscordNotifier(gateway, channelName);
+        SessionStore sessionStore     = new SessionStore(sessionDao);
+        WatchlistScheduler scheduler  = new WatchlistScheduler(
+                notifier, alpaca, analysisService, orderManager, watchlistDao, scheduleTime, defaultQty);
         scheduler.setKrakenClient(kraken);
         scheduler.start();
 
@@ -94,6 +104,7 @@ public class Main {
 
         scheduler.shutdown();
         slippageTracker.shutdown();
+        db.close();
     }
 
     private static String requireEnv(Dotenv env, String key) {
