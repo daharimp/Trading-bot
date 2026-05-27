@@ -11,6 +11,10 @@ primary_region = 'iad'
 [env]
   ALPACA_MODE = 'paper'
 
+[[mounts]]
+  source = 'data'
+  destination = '/data'
+
 [[vm]]
   size = 'shared-cpu-1x'
   memory = '512mb'
