@@ -32,10 +32,15 @@ public class FundamentalAnalyst {
             - Evaluate valuation (P/E relative to sector norms, analyst target vs current price).
             - Identify the company's competitive moat and key risks.
             - Flag upcoming catalysts (earnings date, guidance, sector tailwinds/headwinds).
-            - Give an overall fundamental rating.
+            - Give an overall fundamental rating AND a numeric conviction score.
+
+            The FUNDAMENTAL SCORE is an integer from -100 (strongly bearish on fundamentals)
+            to +100 (strongly bullish). 0 is neutral. This score is consumed programmatically and
+            fused with technical signals, so it MUST be on its own line exactly as shown.
 
             Format your response EXACTLY like this:
 
+            FUNDAMENTAL SCORE: <integer -100..100>
             FUNDAMENTAL RATING: <STRONG BUY | BUY | NEUTRAL | SELL | STRONG SELL>
             • <bullet 1>
             • <bullet 2>
@@ -46,6 +51,9 @@ public class FundamentalAnalyst {
 
             Keep each bullet concise (1-2 sentences max). Focus on what a trader needs to know.
             """;
+
+    /** Fundamental summary plus a parsed -100..100 conviction score (NaN if unavailable). */
+    public record FundamentalResult(String summary, double score) {}
 
     private final OkHttpClient http;
     private final String apiKey;
@@ -60,7 +68,7 @@ public class FundamentalAnalyst {
                 .build();
     }
 
-    public String analyze(String ticker, FundamentalData data) {
+    public FundamentalResult analyze(String ticker, FundamentalData data) {
         String userPrompt = buildPrompt(ticker, data);
 
         try {
@@ -94,16 +102,31 @@ public class FundamentalAnalyst {
                     throw new RuntimeException("OpenRouter API error " + resp.code() + ": " + raw);
                 }
                 JsonObject json = JsonParser.parseString(raw).getAsJsonObject();
-                return json.getAsJsonArray("choices")
+                String content = json.getAsJsonArray("choices")
                         .get(0).getAsJsonObject()
                         .getAsJsonObject("message")
                         .get("content").getAsString()
                         .trim();
+                return new FundamentalResult(content, parseScore(content));
             }
 
         } catch (Exception e) {
             log.error("Fundamental LLM analysis failed for {}: {}", ticker, e.getMessage());
-            return "⚠️ Fundamental analysis unavailable: " + e.getMessage();
+            return new FundamentalResult("⚠️ Fundamental analysis unavailable: " + e.getMessage(), Double.NaN);
+        }
+    }
+
+    private static final java.util.regex.Pattern SCORE_LINE =
+            java.util.regex.Pattern.compile("(?im)^\\s*FUNDAMENTAL\\s+SCORE\\s*:\\s*(-?\\d+(?:\\.\\d+)?)");
+
+    /** Extracts the FUNDAMENTAL SCORE line, clamped to -100..100. Returns NaN if absent. */
+    private static double parseScore(String content) {
+        java.util.regex.Matcher m = SCORE_LINE.matcher(content);
+        if (!m.find()) return Double.NaN;
+        try {
+            return Math.max(-100, Math.min(100, Double.parseDouble(m.group(1))));
+        } catch (NumberFormatException e) {
+            return Double.NaN;
         }
     }
 

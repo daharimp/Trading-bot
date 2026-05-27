@@ -216,6 +216,21 @@ public class DiscordListener {
             return ch.createMessage("🚀 Overnight analysis triggered — results will be posted shortly.");
         }
 
+        // ── !BACKTEST TICKER [timeframe] ────────────────────────────────────────
+        if (content.startsWith("!BACKTEST ")) {
+            String[] parts = content.substring("!BACKTEST ".length()).trim().split("\\s+");
+            String ticker = parts[0];
+            String tf = parts.length > 1 ? parts[1] : null;
+            if (!ticker.matches("[A-Z0-9/]{1,10}")) {
+                return ch.createMessage("❌ Usage: `!backtest BTC 1H` (timeframes: 5m 15m 1H 4H 1D)");
+            }
+            return ch.createMessage("⏳ Backtesting **" + ticker + "** on historical bars...")
+                    .flatMap(status -> Mono.fromCallable(() -> analysisService.runBacktest(ticker, tf))
+                            .subscribeOn(Schedulers.boundedElastic())
+                            .flatMap(ch::createMessage))
+                    .onErrorResume(e -> ch.createMessage("❌ Backtest failed: " + e.getMessage()));
+        }
+
         // ── !PLAY (manual bracket order) ────────────────────────────────────────
         if (content.startsWith("!PLAY ")) {
             return Mono.fromCallable(() -> parseAndPlaceOrder(content))
@@ -369,11 +384,15 @@ public class DiscordListener {
                 try { qty = Integer.parseInt(kv[1]); } catch (NumberFormatException ignored) {}
             }
         }
-        if (qty <= 0) {
-            return "❌ Must specify quantity. Example: `!pick 1 qty=10`";
-        }
 
         TradeIdea chosen = pending.get(n - 1);
+        if (qty <= 0) {
+            qty = chosen.getSuggestedQty();  // fall back to the risk-sized quantity
+        }
+        if (qty <= 0) {
+            return "❌ No risk-sized quantity available — specify one. Example: `!pick 1 qty=10`";
+        }
+
         return orderManager.placePlay(
                 chosen.getTicker(),
                 chosen.getDirection().name(),
@@ -433,7 +452,8 @@ public class DiscordListener {
                 **Trading Bot Commands**
                 `!analyze AAPL` — Full technical + fundamental analysis with chart
                 `!analyze BTC/USD` — Crypto analysis (no fundamentals)
-                `!pick 1 qty=10` — Place setup #1 from the last analysis as a bracket order
+                `!pick 1` — Place setup #1 using the risk-sized qty (or `!pick 1 qty=10` to override)
+                `!backtest BTC 1H` — Backtest the rules engine on historical bars (timeframes: 5m 15m 1H 4H 1D)
                 `!watch AAPL TSLA` — Add tickers to overnight watchlist
                 `!watch AAPL auto` — Add with auto-place HIGH conviction setups overnight
                 `!unwatch AAPL` — Remove ticker from watchlist

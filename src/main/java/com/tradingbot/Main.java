@@ -55,12 +55,15 @@ public class Main {
         String dbPath           = env.get("DB_PATH", "./trading-bot.db");
         int maxDailyTrades      = Integer.parseInt(env.get("MAX_DAILY_TRADES", "15"));
         double minEquityUsd     = Double.parseDouble(env.get("MIN_EQUITY_USD", "500"));
+        double riskPerTradePct  = Double.parseDouble(env.get("RISK_PER_TRADE_PCT", "1.0"));
+        double maxPortfolioRisk = Double.parseDouble(env.get("MAX_PORTFOLIO_RISK_PCT", "5.0"));
 
         DatabaseManager db        = new DatabaseManager(dbPath);
         WatchlistDao watchlistDao = new WatchlistDao(db.jdbi());
         SessionDao   sessionDao   = new SessionDao(db.jdbi());
         OrderDao     orderDao     = new OrderDao(db.jdbi());
         BrokerAccountDao brokerAccountDao = new BrokerAccountDao(db.jdbi());
+        com.tradingbot.db.PerformanceDao performanceDao = new com.tradingbot.db.PerformanceDao(db.jdbi());
 
         OkHttpClient httpClient       = new OkHttpClient();
         AlpacaClient alpaca           = new AlpacaClient(alpacaKey, alpacaSecret, alpacaMode);
@@ -69,6 +72,7 @@ public class Main {
         alpaca.setKrakenClient(kraken);
         FundamentalDataClient fdClient = new FundamentalDataClient(alphaVantageKey);
         TechnicalAnalyst techAnalyst  = new TechnicalAnalyst(anthropicKey, openRouterKey, technicalModel);
+        techAnalyst.setPerformanceContext(performanceDao::performanceContext);
         FundamentalAnalyst fundAnalyst = new FundamentalAnalyst(openRouterKey, fundamentalModel);
         AnalysisService analysisService = new AnalysisService(alpaca, techAnalyst, fundAnalyst, fdClient);
         analysisService.setKrakenClient(kraken);
@@ -79,6 +83,10 @@ public class Main {
 
         AccountMonitor accountMonitor = new AccountMonitor(kraken, minEquityUsd);
         orderManager.setAccountMonitor(accountMonitor);
+
+        com.tradingbot.order.PositionSizer positionSizer =
+                new com.tradingbot.order.PositionSizer(riskPerTradePct, maxPortfolioRisk);
+        analysisService.setRiskSizing(positionSizer, accountMonitor::getTotalUsdValue);
 
         ChartRenderer chartRenderer   = new ChartRenderer();
 

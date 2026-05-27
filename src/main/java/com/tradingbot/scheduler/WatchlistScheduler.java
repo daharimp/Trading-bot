@@ -186,13 +186,14 @@ public class WatchlistScheduler {
                     }
                 }
 
+                int qty = idea.getSuggestedQty() > 0 ? idea.getSuggestedQty() : defaultQty;
                 String confirmation = orderManager.placePlayOpg(
                         idea.getTicker(),
                         idea.getDirection().name(),
                         idea.getEntry(),
                         idea.getStopLoss(),
                         idea.getTarget(),
-                        defaultQty);
+                        qty);
                 notifier.postMessage("🤖 **AUTO-PLAY** " + confirmation);
             } catch (Exception e) {
                 log.error("Auto-play order failed for {}: {}", ticker, e.getMessage());
