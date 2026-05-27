@@ -3,7 +3,9 @@ package com.tradingbot.discord;
 import com.tradingbot.alpaca.AlpacaClient;
 import com.tradingbot.analysis.AnalysisService;
 import com.tradingbot.chart.ChartRenderer;
+import com.tradingbot.kraken.KrakenClient;
 import com.tradingbot.model.TradeIdea;
+import com.tradingbot.monitor.AccountMonitor;
 import com.tradingbot.order.OrderManager;
 import com.tradingbot.scheduler.WatchlistScheduler;
 import discord4j.core.event.domain.message.MessageCreateEvent;
@@ -31,6 +33,7 @@ public class DiscordListener {
     private final ChartRenderer chartRenderer;
     private final SessionStore sessionStore;
     private final String watchedChannel;
+    private AccountMonitor accountMonitor;
 
     public DiscordListener(AnalysisService analysisService, OrderManager orderManager,
                            WatchlistScheduler scheduler, ChartRenderer chartRenderer,
@@ -42,6 +45,8 @@ public class DiscordListener {
         this.sessionStore    = sessionStore;
         this.watchedChannel  = watchedChannel;
     }
+
+    public void setAccountMonitor(AccountMonitor monitor) { this.accountMonitor = monitor; }
 
     public Mono<Void> handle(MessageCreateEvent event) {
         Message message = event.getMessage();
@@ -150,11 +155,19 @@ public class DiscordListener {
         }
 
         // ── !POSITIONS ──────────────────────────────────────────────────────────
-        if (content.equals("!POSITIONS")) {
-            return Mono.fromCallable(orderManager::listPositions)
-                    .subscribeOn(Schedulers.boundedElastic())
-                    .flatMap(ch::createMessage)
-                    .onErrorResume(e -> ch.createMessage("❌ Could not fetch positions: " + e.getMessage()));
+        if (content.startsWith("!POSITIONS")) {
+            return sendChunked(ch, buildPositionsOutput(), null);
+        }
+
+        // ── !EXIT ───────────────────────────────────────────────────────────────
+        if (content.startsWith("!EXIT")) {
+            String result = handleExit(content.trim());
+            return ch.createMessage(result);
+        }
+
+        // ── !RESUME ─────────────────────────────────────────────────────────────
+        if (content.startsWith("!RESUME")) {
+            return ch.createMessage(handleResume());
         }
 
         // ── !CANCEL ─────────────────────────────────────────────────────────────
@@ -175,6 +188,68 @@ public class DiscordListener {
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────────
+
+    private String handleExit(String content) {
+        String[] parts = content.split("\\s+");
+        if (parts.length < 2) return "Usage: !exit <SYMBOL> or !exit all";
+        String arg = parts[1].toUpperCase();
+        KrakenClient kc = orderManager.getKrakenClient();
+        if (kc == null) return "Kraken not configured.";
+        if (arg.equals("ALL")) {
+            Map<String, Double> positions = kc.getOpenPositions();
+            if (positions.isEmpty()) return "No open positions found.";
+            StringBuilder sb = new StringBuilder("Closing all positions:\n");
+            for (String ticker : positions.keySet()) {
+                sb.append(String.format("• %s: %s\n", ticker, kc.closePosition(ticker)));
+            }
+            return sb.toString().trim();
+        }
+        return "Exited " + arg + " — " + kc.closePosition(arg);
+    }
+
+    private String handleResume() {
+        if (accountMonitor == null) return "AccountMonitor not configured.";
+        return accountMonitor.unpause();
+    }
+
+    private String buildPositionsOutput() {
+        StringBuilder sb = new StringBuilder();
+        KrakenClient kc = orderManager.getKrakenClient();
+        if (kc != null) {
+            Map<String, Double> positions = kc.getOpenPositions();
+            if (!positions.isEmpty()) {
+                sb.append("📊 **Live Crypto Positions (Kraken)**\n");
+                double totalCryptoValue = 0;
+                for (Map.Entry<String, Double> pos : positions.entrySet()) {
+                    String ticker = pos.getKey(); double qty = pos.getValue();
+                    try {
+                        double mid = kc.getLatestQuote(ticker).mid();
+                        totalCryptoValue += qty * mid;
+                        sb.append(String.format("%-6s | %.6f | Now: $%.4f | Value: $%.2f\n", ticker, qty, mid, qty * mid));
+                    } catch (Exception e) {
+                        sb.append(String.format("%-6s | %.6f (price unavailable)\n", ticker, qty));
+                    }
+                }
+                if (accountMonitor != null) {
+                    Map<String, Double> balances = kc.getAccountBalance();
+                    double usdCash = balances.getOrDefault("ZUSD", 0.0);
+                    double total = accountMonitor.getTotalUsdValue();
+                    sb.append(String.format("Balance: $%.2f USD + ~$%.2f crypto = ~$%.2f total\n", usdCash, totalCryptoValue, total));
+                }
+            } else {
+                sb.append("📊 **Kraken:** No open crypto positions.\n");
+            }
+            sb.append("\n");
+        }
+        sb.append(String.format("Trades today: %d/%d\n\n", orderManager.getDailyTradeCount(), orderManager.getMaxDailyTrades()));
+        sb.append("📋 **Paper Positions (Alpaca)**\n");
+        try {
+            sb.append(orderManager.listPositions());
+        } catch (Exception e) {
+            sb.append("❌ Could not fetch Alpaca positions: ").append(e.getMessage());
+        }
+        return sb.toString();
+    }
 
     private record ChartedResult(AnalysisService.AnalysisResult analysisResult, byte[] chartPng) {}
 
