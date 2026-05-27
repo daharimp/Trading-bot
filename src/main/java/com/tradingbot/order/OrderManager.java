@@ -3,6 +3,7 @@ package com.tradingbot.order;
 import com.tradingbot.alpaca.AlpacaClient;
 import com.tradingbot.db.OrderDao;
 import com.tradingbot.kraken.KrakenClient;
+import com.tradingbot.monitor.AccountMonitor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -16,15 +17,43 @@ public class OrderManager {
     private final SlippageTracker slippageTracker;
     private final OrderDao orderDao;
     private KrakenClient kraken;
+    private AccountMonitor accountMonitor;
+    private final java.util.concurrent.atomic.AtomicInteger dailyTradeCount =
+            new java.util.concurrent.atomic.AtomicInteger(0);
+    private final int maxDailyTrades;
+    private final java.util.concurrent.ScheduledExecutorService dailyResetScheduler =
+            java.util.concurrent.Executors.newSingleThreadScheduledExecutor(r -> {
+                Thread t = new Thread(r, "daily-reset");
+                t.setDaemon(true);
+                return t;
+            });
 
-    public OrderManager(AlpacaClient alpaca, SlippageTracker slippageTracker, OrderDao orderDao) {
+    public OrderManager(AlpacaClient alpaca, SlippageTracker slippageTracker, OrderDao orderDao, int maxDailyTrades) {
         this.alpaca = alpaca;
         this.slippageTracker = slippageTracker;
         this.orderDao = orderDao;
+        this.maxDailyTrades = maxDailyTrades;
+        scheduleDailyReset();
     }
 
     public void setKrakenClient(KrakenClient krakenClient) {
         this.kraken = krakenClient;
+    }
+
+    public void setAccountMonitor(AccountMonitor monitor) { this.accountMonitor = monitor; }
+    public int getDailyTradeCount() { return dailyTradeCount.get(); }
+    public int getMaxDailyTrades()  { return maxDailyTrades; }
+    public KrakenClient getKrakenClient() { return kraken; }
+
+    private void scheduleDailyReset() {
+        java.time.ZonedDateTime now = java.time.ZonedDateTime.now(java.time.ZoneId.of("America/New_York"));
+        java.time.ZonedDateTime nextMidnight = now.toLocalDate().plusDays(1)
+                .atStartOfDay(java.time.ZoneId.of("America/New_York"));
+        long secondsUntilMidnight = java.time.Duration.between(now, nextMidnight).getSeconds();
+        dailyResetScheduler.scheduleAtFixedRate(
+            () -> { int prev = dailyTradeCount.getAndSet(0); log.info("Daily trade counter reset (was {})", prev); },
+            secondsUntilMidnight, 86400, java.util.concurrent.TimeUnit.SECONDS
+        );
     }
 
     /**
@@ -35,6 +64,13 @@ public class OrderManager {
      */
     public String placePlay(String ticker, String direction, double entry,
                              double stop, double target, int qty) throws Exception {
+        if (accountMonitor != null && accountMonitor.isPaused()) {
+            return "⛔ Bot is paused — account below minimum equity. Use !resume to re-enable.";
+        }
+        if (dailyTradeCount.get() >= maxDailyTrades) {
+            return String.format("🚫 Daily trade limit reached (%d/%d). No new orders until midnight ET.",
+                    dailyTradeCount.get(), maxDailyTrades);
+        }
         String side = direction.equalsIgnoreCase("LONG") ? "buy" : "sell";
 
         if (qty <= 0) return "❌ Quantity must be greater than 0.";
@@ -70,6 +106,7 @@ public class OrderManager {
         String orderId = alpaca.placeOrder(ticker, side, entry, stop, target, qty);
         slippageTracker.record(orderId, ticker, side, entry);
         orderDao.recordAlpacaOrder(ticker, direction, entry, stop, target, qty, orderId, "day");
+        dailyTradeCount.incrementAndGet();
 
         return String.format("""
                 ✅ **Bracket Order Placed**
@@ -94,6 +131,13 @@ public class OrderManager {
      */
     public String placePlayOpg(String ticker, String direction, double entry,
                                 double stop, double target, int qty) throws Exception {
+        if (accountMonitor != null && accountMonitor.isPaused()) {
+            return "⛔ Bot is paused — account below minimum equity. Use !resume to re-enable.";
+        }
+        if (dailyTradeCount.get() >= maxDailyTrades) {
+            return String.format("🚫 Daily trade limit reached (%d/%d). No new orders until midnight ET.",
+                    dailyTradeCount.get(), maxDailyTrades);
+        }
         String side = direction.equalsIgnoreCase("LONG") ? "buy" : "sell";
 
         if (qty <= 0) return "❌ Quantity must be greater than 0.";
@@ -127,6 +171,7 @@ public class OrderManager {
         String orderId = alpaca.placeOrder(ticker, side, entry, stop, target, qty, "opg");
         slippageTracker.record(orderId, ticker, side, entry);
         orderDao.recordAlpacaOrder(ticker, direction, entry, stop, target, qty, orderId, "opg");
+        dailyTradeCount.incrementAndGet();
 
         return String.format("""
                 ✅ **OPG Bracket Order Placed** *(opening auction)*
@@ -157,6 +202,7 @@ public class OrderManager {
 
         slippageTracker.record(entryTxid, ticker, direction.equalsIgnoreCase("LONG") ? "buy" : "sell", entry);
         orderDao.recordKrakenOrder(ticker, direction, entry, stop, target, qty, entryTxid, tpTxid);
+        dailyTradeCount.incrementAndGet();
 
         return String.format("""
                 ✅ **Kraken Bracket Placed** *(crypto — 24/7)*
