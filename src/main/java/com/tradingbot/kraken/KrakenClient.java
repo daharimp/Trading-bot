@@ -26,6 +26,7 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.ZonedDateTime;
 import java.util.Base64;
+import java.util.LinkedHashMap;
 import java.util.Map;
 
 /**
@@ -185,6 +186,107 @@ public class KrakenClient {
         String tpTxid    = addOrder(pair, tpType,    qty, target, 0);
 
         return entryTxid + "/" + tpTxid;
+    }
+
+    public Map<String, Double> getAccountBalance() {
+        if (!hasCredentials) return Map.of();
+        try {
+            String nonce = String.valueOf(System.currentTimeMillis());
+            String postData = "nonce=" + nonce;
+            String signature = sign("/0/private/Balance", nonce, postData);
+            RequestBody body = RequestBody.create(postData, okhttp3.MediaType.parse("application/x-www-form-urlencoded"));
+            Request req = new Request.Builder()
+                    .url(BASE + "/0/private/Balance")
+                    .addHeader("API-Key", apiKey)
+                    .addHeader("API-Sign", signature)
+                    .post(body)
+                    .build();
+            try (Response resp = http.newCall(req).execute()) {
+                String json = resp.body().string();
+                JsonObject root = JsonParser.parseString(json).getAsJsonObject();
+                JsonArray errors = root.getAsJsonArray("error");
+                if (!errors.isEmpty()) { log.warn("Kraken balance error: {}", errors); return Map.of(); }
+                Map<String, Double> balances = new LinkedHashMap<>();
+                JsonObject result = root.getAsJsonObject("result");
+                for (Map.Entry<String, JsonElement> e : result.entrySet()) {
+                    balances.put(e.getKey(), Double.parseDouble(e.getValue().getAsString()));
+                }
+                return balances;
+            }
+        } catch (Exception e) { log.error("Failed to fetch Kraken balance", e); return Map.of(); }
+    }
+
+    public Map<String, Double> getOpenPositions() {
+        Map<String, Double> balances = getAccountBalance();
+        Map<String, Double> positions = new LinkedHashMap<>();
+        Map<String, String> assetToTicker = Map.ofEntries(
+            Map.entry("XXBT","BTC"), Map.entry("XETH","ETH"), Map.entry("SOL","SOL"),
+            Map.entry("XDOGE","DOGE"), Map.entry("AVAX","AVAX"), Map.entry("MATIC","MATIC"),
+            Map.entry("LINK","LINK"), Map.entry("UNI","UNI"), Map.entry("ADA","ADA"),
+            Map.entry("XXRP","XRP"), Map.entry("XLTC","LTC"), Map.entry("BCH","BCH"),
+            Map.entry("HYPE","HYPE")
+        );
+        for (Map.Entry<String, Double> e : balances.entrySet()) {
+            String asset = e.getKey(); double qty = e.getValue();
+            if (qty < 0.00001) continue;
+            if (asset.equals("ZUSD")) continue;
+            positions.put(assetToTicker.getOrDefault(asset, asset), qty);
+        }
+        return positions;
+    }
+
+    public int cancelAllOpenOrders() {
+        if (!hasCredentials) return 0;
+        try {
+            String nonce = String.valueOf(System.currentTimeMillis());
+            String postData = "nonce=" + nonce;
+            String signature = sign("/0/private/CancelAll", nonce, postData);
+            RequestBody body = RequestBody.create(postData, okhttp3.MediaType.parse("application/x-www-form-urlencoded"));
+            Request req = new Request.Builder()
+                    .url(BASE + "/0/private/CancelAll")
+                    .addHeader("API-Key", apiKey)
+                    .addHeader("API-Sign", signature)
+                    .post(body)
+                    .build();
+            try (Response resp = http.newCall(req).execute()) {
+                String json = resp.body().string();
+                JsonObject root = JsonParser.parseString(json).getAsJsonObject();
+                JsonArray errors = root.getAsJsonArray("error");
+                if (!errors.isEmpty()) { log.warn("Kraken cancelAll error: {}", errors); return 0; }
+                return root.getAsJsonObject("result").get("count").getAsInt();
+            }
+        } catch (Exception e) { log.error("Failed to cancel all Kraken orders", e); return 0; }
+    }
+
+    public String closePosition(String ticker) {
+        if (!hasCredentials) return "No Kraken credentials configured.";
+        try {
+            Map<String, Double> positions = getOpenPositions();
+            Double qty = positions.get(ticker.toUpperCase());
+            if (qty == null || qty < 0.00001) return "No open position found for " + ticker;
+            String pair = toKrakenPair(ticker);
+            if (pair == null) return "Unsupported ticker: " + ticker;
+            String nonce = String.valueOf(System.currentTimeMillis());
+            String volume = String.format("%.8f", qty).replaceAll("0+$", "").replaceAll("\\.$", ".0");
+            String postData = "nonce=" + nonce + "&ordertype=market&type=sell&volume=" + volume + "&pair=" + pair;
+            String signature = sign("/0/private/AddOrder", nonce, postData);
+            RequestBody body = RequestBody.create(postData, okhttp3.MediaType.parse("application/x-www-form-urlencoded"));
+            Request req = new Request.Builder()
+                    .url(BASE + "/0/private/AddOrder")
+                    .addHeader("API-Key", apiKey)
+                    .addHeader("API-Sign", signature)
+                    .post(body)
+                    .build();
+            try (Response resp = http.newCall(req).execute()) {
+                String json = resp.body().string();
+                JsonObject root = JsonParser.parseString(json).getAsJsonObject();
+                JsonArray errors = root.getAsJsonArray("error");
+                if (!errors.isEmpty()) return "Kraken error: " + errors.get(0).getAsString();
+                double midPrice = 0;
+                try { midPrice = getLatestQuote(ticker).mid(); } catch (Exception ignored) {}
+                return String.format("Sold %.6f %s at market (~$%.2f)", qty, ticker.toUpperCase(), midPrice);
+            }
+        } catch (Exception e) { log.error("Failed to close position for {}", ticker, e); return "Error closing position: " + e.getMessage(); }
     }
 
     /** Sends a single AddOrder request. If stop > 0 a conditional stop-loss-limit close is attached. */
