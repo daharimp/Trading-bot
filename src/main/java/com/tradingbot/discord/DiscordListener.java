@@ -3,6 +3,7 @@ package com.tradingbot.discord;
 import com.tradingbot.alpaca.AlpacaClient;
 import com.tradingbot.analysis.AnalysisService;
 import com.tradingbot.chart.ChartRenderer;
+import com.tradingbot.kraken.KrakenAccountRegistry;
 import com.tradingbot.kraken.KrakenClient;
 import com.tradingbot.model.TradeIdea;
 import com.tradingbot.monitor.AccountMonitor;
@@ -12,6 +13,7 @@ import discord4j.core.event.domain.message.MessageCreateEvent;
 import discord4j.core.object.entity.Message;
 import discord4j.core.object.entity.channel.GuildMessageChannel;
 import discord4j.core.object.entity.channel.MessageChannel;
+import discord4j.core.object.entity.channel.PrivateChannel;
 import discord4j.core.spec.MessageCreateSpec;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -33,17 +35,20 @@ public class DiscordListener {
     private final ChartRenderer chartRenderer;
     private final SessionStore sessionStore;
     private final String watchedChannel;
+    private final KrakenAccountRegistry krakenRegistry;
     private AccountMonitor accountMonitor;
 
     public DiscordListener(AnalysisService analysisService, OrderManager orderManager,
                            WatchlistScheduler scheduler, ChartRenderer chartRenderer,
-                           SessionStore sessionStore, String watchedChannel) {
-        this.analysisService = analysisService;
-        this.orderManager    = orderManager;
-        this.scheduler       = scheduler;
-        this.chartRenderer   = chartRenderer;
-        this.sessionStore    = sessionStore;
-        this.watchedChannel  = watchedChannel;
+                           SessionStore sessionStore, String watchedChannel,
+                           KrakenAccountRegistry krakenRegistry) {
+        this.analysisService  = analysisService;
+        this.orderManager     = orderManager;
+        this.scheduler        = scheduler;
+        this.chartRenderer    = chartRenderer;
+        this.sessionStore     = sessionStore;
+        this.watchedChannel   = watchedChannel;
+        this.krakenRegistry   = krakenRegistry;
     }
 
     public void setAccountMonitor(AccountMonitor monitor) { this.accountMonitor = monitor; }
@@ -52,15 +57,80 @@ public class DiscordListener {
         Message message = event.getMessage();
         if (message.getAuthor().map(u -> u.isBot()).orElse(true)) return Mono.empty();
 
-        String content = message.getContent().trim().toUpperCase();
+        String content  = message.getContent().trim().toUpperCase();
+        String authorId = message.getAuthor().map(u -> u.getId().asString()).orElse("");
+
+        // !account commands are handled in DMs only, before channel filtering
+        if (content.startsWith("!ACCOUNT")) {
+            return message.getChannel()
+                    .flatMap(ch -> routeAccount(content, ch, authorId, message))
+                    .then();
+        }
 
         return message.getChannel()
                 .filter(ch -> channelMatches(ch, watchedChannel))
-                .flatMap(ch -> route(content, ch))
+                .flatMap(ch -> route(content, ch, authorId))
                 .then();
     }
 
-    private Mono<?> route(String content, MessageChannel ch) {
+    private Mono<?> routeAccount(String content, MessageChannel ch, String authorId, Message message) {
+        // !ACCOUNT ADD KRAKEN <label> <api_key> <api_secret>
+        // !ACCOUNT USE KRAKEN <label>
+        // !ACCOUNT REMOVE KRAKEN <label>
+        // !ACCOUNT LIST KRAKEN
+        // Must be a DM for add/remove to protect credentials
+        String[] parts = content.split("\\s+");
+        boolean isDm = ch instanceof PrivateChannel;
+
+        // Parse subcommand from uppercased content, but use raw message for credentials to avoid case corruption
+        String sub = parts.length > 1 ? parts[1] : "";
+
+        if (sub.isEmpty()) return ch.createMessage(accountHelpText());
+
+        return switch (sub) {
+            case "ADD" -> {
+                if (!isDm) yield ch.createMessage("⚠️ Use a DM for `!account add` to keep your credentials private.");
+                // Parse from raw message — content is uppercased and would corrupt the secret
+                String[] rawParts = message.getContent().trim().split("\\s+");
+                if (rawParts.length < 6) yield ch.createMessage("Usage: `!account add kraken <label> <api_key> <api_secret>`");
+                String label  = rawParts[3].toLowerCase();
+                String apiKey = rawParts[4];
+                String secret = rawParts[5];
+                krakenRegistry.register(authorId, label, apiKey, secret);
+                // Delete the message immediately so the secret doesn't linger in chat history
+                message.delete("removing credential message").subscribe();
+                yield ch.createMessage("✅ Kraken account **" + label + "** registered (your message was auto-deleted). Use `!account use kraken " + label + "` to activate it.");
+            }
+            case "USE" -> {
+                if (parts.length < 4) yield ch.createMessage("Usage: `!account use kraken <label>`");
+                String label = parts[3].toLowerCase();
+                boolean ok = krakenRegistry.setActive(authorId, label);
+                yield ch.createMessage(ok
+                        ? "✅ Switched active Kraken account to **" + label + "**."
+                        : "❌ No account with label **" + label + "** found. Use `!account list kraken` to see registered accounts.");
+            }
+            case "REMOVE" -> {
+                if (!isDm) yield ch.createMessage("⚠️ Use a DM for `!account remove`.");
+                if (parts.length < 4) yield ch.createMessage("Usage: `!account remove kraken <label>`");
+                String label = parts[3].toLowerCase();
+                boolean ok = krakenRegistry.remove(authorId, label);
+                yield ch.createMessage(ok
+                        ? "✅ Removed Kraken account **" + label + "**."
+                        : "❌ No account with label **" + label + "** found.");
+            }
+            case "LIST" -> {
+                java.util.List<String> labels = krakenRegistry.listLabels(authorId);
+                yield ch.createMessage(labels.isEmpty()
+                        ? "No Kraken accounts registered. Use `!account add kraken <label> <key> <secret>` in a DM."
+                        : "🔑 **Your Kraken accounts:** " + String.join(", ", labels));
+            }
+            default -> ch.createMessage(accountHelpText());
+        };
+    }
+
+    private Mono<?> route(String content, MessageChannel ch, String authorId) {
+
+        KrakenClient kc = krakenRegistry.resolve(authorId);
 
         // ── !ANALYZE ────────────────────────────────────────────────────────────
         if (content.startsWith("!ANALYZE ")) {
@@ -156,12 +226,12 @@ public class DiscordListener {
 
         // ── !POSITIONS ──────────────────────────────────────────────────────────
         if (content.startsWith("!POSITIONS")) {
-            return sendChunked(ch, buildPositionsOutput(), null);
+            return sendChunked(ch, buildPositionsOutput(kc), null);
         }
 
         // ── !EXIT ───────────────────────────────────────────────────────────────
         if (content.startsWith("!EXIT")) {
-            String result = handleExit(content.trim());
+            String result = handleExit(content.trim(), kc);
             return ch.createMessage(result);
         }
 
@@ -189,11 +259,10 @@ public class DiscordListener {
 
     // ── Helpers ──────────────────────────────────────────────────────────────────
 
-    private String handleExit(String content) {
+    private String handleExit(String content, KrakenClient kc) {
         String[] parts = content.split("\\s+");
         if (parts.length < 2) return "Usage: !exit <SYMBOL> or !exit all";
         String arg = parts[1].toUpperCase();
-        KrakenClient kc = orderManager.getKrakenClient();
         if (kc == null) return "Kraken not configured.";
         if (arg.equals("ALL")) {
             Map<String, Double> positions = kc.getOpenPositions();
@@ -212,9 +281,8 @@ public class DiscordListener {
         return accountMonitor.unpause();
     }
 
-    private String buildPositionsOutput() {
+    private String buildPositionsOutput(KrakenClient kc) {
         StringBuilder sb = new StringBuilder();
-        KrakenClient kc = orderManager.getKrakenClient();
         if (kc != null) {
             Map<String, Double> positions = kc.getOpenPositions();
             if (!positions.isEmpty()) {
@@ -348,6 +416,16 @@ public class DiscordListener {
         if (name == null || name.isBlank()) return true;
         if (ch instanceof GuildMessageChannel gmc) return gmc.getName().equalsIgnoreCase(name);
         return false;
+    }
+
+    private String accountHelpText() {
+        return """
+                **Account Commands** *(use in DM for add/remove)*
+                `!account add kraken <label> <api_key> <api_secret>` — Register a Kraken account
+                `!account use kraken <label>` — Switch active Kraken account
+                `!account remove kraken <label>` — Remove a registered account
+                `!account list kraken` — List your registered accounts
+                """;
     }
 
     private String helpText() {

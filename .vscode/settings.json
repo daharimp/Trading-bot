@@ -1,6 +1,40 @@
 {
-    "java.project.sourcePaths": [
-        "src"
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run --directory memory-compiler python memory-compiler/hooks/session-start.py",
+            "timeout": 15
+          }
+        ]
+      }
     ],
-    "java.configuration.updateBuildConfiguration": "interactive"
+    "PreCompact": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run --directory memory-compiler python memory-compiler/hooks/pre-compact.py",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run --directory memory-compiler python memory-compiler/hooks/session-end.py",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
 }

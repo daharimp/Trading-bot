@@ -374,6 +374,34 @@ public class AlpacaClient {
     }
 
     /**
+     * Fetches all orders (any status) and returns a map of orderId -> status.
+     * Used at boot to reconcile the local DB against Alpaca's ground truth.
+     */
+    public Map<String, String> getAllOrderStatuses() throws IOException {
+        Request request = new Request.Builder()
+                .url(tradingBaseUrl + "/v2/orders?status=all&limit=500&direction=desc")
+                .addHeader("APCA-API-KEY-ID", apiKey)
+                .addHeader("APCA-API-SECRET-KEY", apiSecret)
+                .build();
+
+        try (Response response = http.newCall(request).execute()) {
+            String body = response.body().string();
+            if (!response.isSuccessful()) {
+                throw new IOException("Failed to fetch orders: HTTP " + response.code());
+            }
+            JsonArray orders = JsonParser.parseString(body).getAsJsonArray();
+            Map<String, String> result = new LinkedHashMap<>();
+            for (JsonElement el : orders) {
+                JsonObject o = el.getAsJsonObject();
+                String id     = o.get("id").getAsString();
+                String status = o.get("status").getAsString();
+                result.put(id, status);
+            }
+            return result;
+        }
+    }
+
+    /**
      * Cancels a pending order by ID.
      */
     public void cancelOrder(String orderId) throws IOException {

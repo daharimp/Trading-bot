@@ -5,6 +5,7 @@ import com.tradingbot.analysis.AnalysisService;
 import com.tradingbot.analysis.FundamentalAnalyst;
 import com.tradingbot.analysis.TechnicalAnalyst;
 import com.tradingbot.chart.ChartRenderer;
+import com.tradingbot.db.BrokerAccountDao;
 import com.tradingbot.db.DatabaseManager;
 import com.tradingbot.db.OrderDao;
 import com.tradingbot.db.SessionDao;
@@ -13,6 +14,7 @@ import com.tradingbot.discord.DiscordListener;
 import com.tradingbot.discord.DiscordNotifier;
 import com.tradingbot.discord.SessionStore;
 import com.tradingbot.fundamental.FundamentalDataClient;
+import com.tradingbot.kraken.KrakenAccountRegistry;
 import com.tradingbot.kraken.KrakenClient;
 import com.tradingbot.monitor.AccountMonitor;
 import com.tradingbot.order.OrderManager;
@@ -54,13 +56,16 @@ public class Main {
         int maxDailyTrades      = Integer.parseInt(env.get("MAX_DAILY_TRADES", "15"));
         double minEquityUsd     = Double.parseDouble(env.get("MIN_EQUITY_USD", "500"));
 
-        DatabaseManager db      = new DatabaseManager(dbPath);
+        DatabaseManager db        = new DatabaseManager(dbPath);
         WatchlistDao watchlistDao = new WatchlistDao(db.jdbi());
         SessionDao   sessionDao   = new SessionDao(db.jdbi());
         OrderDao     orderDao     = new OrderDao(db.jdbi());
+        BrokerAccountDao brokerAccountDao = new BrokerAccountDao(db.jdbi());
 
+        OkHttpClient httpClient       = new OkHttpClient();
         AlpacaClient alpaca           = new AlpacaClient(alpacaKey, alpacaSecret, alpacaMode);
-        KrakenClient kraken           = new KrakenClient(new OkHttpClient(), krakenKey, krakenSecret);
+        KrakenClient kraken           = new KrakenClient(httpClient, krakenKey, krakenSecret);
+        KrakenAccountRegistry krakenRegistry = new KrakenAccountRegistry(brokerAccountDao, httpClient, kraken);
         alpaca.setKrakenClient(kraken);
         FundamentalDataClient fdClient = new FundamentalDataClient(alphaVantageKey);
         TechnicalAnalyst techAnalyst  = new TechnicalAnalyst(anthropicKey, openRouterKey, technicalModel);
@@ -85,7 +90,8 @@ public class Main {
                 .setEnabledIntents(IntentSet.of(
                         Intent.GUILDS,
                         Intent.GUILD_MESSAGES,
-                        Intent.MESSAGE_CONTENT))
+                        Intent.MESSAGE_CONTENT,
+                        Intent.DIRECT_MESSAGES))
                 .login()
                 .block();
 
@@ -104,10 +110,17 @@ public class Main {
         scheduler.start();
 
         DiscordListener listener = new DiscordListener(
-                analysisService, orderManager, scheduler, chartRenderer, sessionStore, channelName);
+                analysisService, orderManager, scheduler, chartRenderer, sessionStore, channelName, krakenRegistry);
         listener.setAccountMonitor(accountMonitor);
 
         gateway.on(MessageCreateEvent.class, listener::handle).subscribe();
+
+        try {
+            int fixed = orderDao.reconcileOnBoot(alpaca.getAllOrderStatuses());
+            if (fixed > 0) log.info("Boot reconcile: updated {} stale order status(es)", fixed);
+        } catch (Exception e) {
+            log.warn("Boot reconcile failed (non-fatal): {}", e.getMessage());
+        }
 
         log.info("Bot online in #{} | Commands: !analyze !watch !play !positions !help", channelName);
         gateway.onDisconnect().block();
