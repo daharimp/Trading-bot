@@ -64,7 +64,9 @@ public class KrakenClient {
             Map.entry("LTC",      "XLTCZUSD"),
             Map.entry("LTC/USD",  "XLTCZUSD"),
             Map.entry("BCH",      "BCHUSD"),
-            Map.entry("BCH/USD",  "BCHUSD")
+            Map.entry("BCH/USD",  "BCHUSD"),
+            Map.entry("HYPE",     "HYPEUSD"),
+            Map.entry("HYPE/USD", "HYPEUSD")
     );
 
     // Kraken OHLC intervals in minutes
