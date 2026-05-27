@@ -14,6 +14,7 @@ import com.tradingbot.discord.DiscordNotifier;
 import com.tradingbot.discord.SessionStore;
 import com.tradingbot.fundamental.FundamentalDataClient;
 import com.tradingbot.kraken.KrakenClient;
+import com.tradingbot.monitor.AccountMonitor;
 import com.tradingbot.order.OrderManager;
 import com.tradingbot.order.SlippageTracker;
 import com.tradingbot.scheduler.WatchlistScheduler;
@@ -50,6 +51,8 @@ public class Main {
         String krakenKey        = env.get("KRAKEN_API_KEY", "");
         String krakenSecret     = env.get("KRAKEN_API_SECRET", "");
         String dbPath           = env.get("DB_PATH", "./trading-bot.db");
+        int maxDailyTrades      = Integer.parseInt(env.get("MAX_DAILY_TRADES", "15"));
+        double minEquityUsd     = Double.parseDouble(env.get("MIN_EQUITY_USD", "500"));
 
         DatabaseManager db      = new DatabaseManager(dbPath);
         WatchlistDao watchlistDao = new WatchlistDao(db.jdbi());
@@ -66,8 +69,12 @@ public class Main {
         analysisService.setKrakenClient(kraken);
         SlippageTracker slippageTracker = alpaca.newSlippageTracker();
         slippageTracker.start();
-        OrderManager orderManager     = new OrderManager(alpaca, slippageTracker, orderDao);
+        OrderManager orderManager     = new OrderManager(alpaca, slippageTracker, orderDao, maxDailyTrades);
         orderManager.setKrakenClient(kraken);
+
+        AccountMonitor accountMonitor = new AccountMonitor(kraken, minEquityUsd);
+        orderManager.setAccountMonitor(accountMonitor);
+
         ChartRenderer chartRenderer   = new ChartRenderer();
 
         log.info("Starting Trading Bot (Alpaca: {} | Technical: {} | Fundamental: {} | Schedule: {}ET)",
@@ -88,6 +95,8 @@ public class Main {
         }
 
         DiscordNotifier notifier      = new DiscordNotifier(gateway, channelName);
+        accountMonitor.setAlertCallback(notifier::postMessage);
+        accountMonitor.start();
         SessionStore sessionStore     = new SessionStore(sessionDao);
         WatchlistScheduler scheduler  = new WatchlistScheduler(
                 notifier, alpaca, analysisService, orderManager, watchlistDao, scheduleTime, defaultQty);
@@ -96,6 +105,7 @@ public class Main {
 
         DiscordListener listener = new DiscordListener(
                 analysisService, orderManager, scheduler, chartRenderer, sessionStore, channelName);
+        listener.setAccountMonitor(accountMonitor);
 
         gateway.on(MessageCreateEvent.class, listener::handle).subscribe();
 
