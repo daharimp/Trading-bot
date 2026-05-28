@@ -123,12 +123,19 @@ public class OutcomeTracker {
         if (win && "BREAKEVEN".equals(outcome)) outcome = "WIN";
         if (!win && "BREAKEVEN".equals(outcome)) outcome = "LOSS";
 
-        performanceDao.recordOutcome(o.id(), o.ticker(), o.direction(),
-                o.entry(), exit, o.qty(), pnl, outcome, o.conviction());
+        try {
+            performanceDao.recordOutcome(o.id(), o.ticker(), o.direction(),
+                    o.entry(), exit, o.qty(), pnl, outcome, o.conviction());
+            log.info("outcome recorded: {} {} {} exit={} pnl={} conviction={}",
+                    o.ticker(), o.direction(), outcome, String.format("%.4f", exit),
+                    String.format("%.2f", pnl), o.conviction());
+        } catch (Exception e) {
+            // V4 UNIQUE index on position_outcomes.order_id makes a duplicate insert throw.
+            // That happens only if a previous poll wrote the outcome but crashed before
+            // markClosed — treat as "already recorded" and proceed to close the order.
+            log.info("outcome already recorded for order {} ({}), closing", o.id(), o.ticker());
+        }
         orderDao.markClosed(o.id());
-        log.info("outcome recorded: {} {} {} exit={} pnl={} conviction={}",
-                o.ticker(), o.direction(), outcome, String.format("%.4f", exit),
-                String.format("%.2f", pnl), o.conviction());
     }
 
     private Map<String, Double> safeKrakenPositions() {
