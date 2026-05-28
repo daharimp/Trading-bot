@@ -4,11 +4,17 @@ import com.tradingbot.db.BrokerAccountDao;
 import okhttp3.OkHttpClient;
 
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Resolves a KrakenClient for a Discord user.
- * Falls back to the bot-level default client (from .env) if the user has no personal account registered.
+ *
+ * Returns the user's personal client if they've registered one. Otherwise returns the
+ * bot-owner default client ONLY if their Discord user ID is on the owner allowlist;
+ * for anyone else the result is empty and callers must refuse the command. This prevents
+ * unregistered Discord members from operating against the bot owner's default credentials.
+ *
  * Instances are cached in-memory; the cache is invalidated when accounts are added, removed, or switched.
  */
 public class KrakenAccountRegistry {
@@ -16,28 +22,41 @@ public class KrakenAccountRegistry {
     private final BrokerAccountDao dao;
     private final OkHttpClient http;
     private final KrakenClient defaultClient;
+    private final Set<String> ownerIds;
 
     // Cache: discordUserId -> KrakenClient built from their active account
     private final ConcurrentHashMap<String, KrakenClient> cache = new ConcurrentHashMap<>();
 
-    public KrakenAccountRegistry(BrokerAccountDao dao, OkHttpClient http, KrakenClient defaultClient) {
+    public KrakenAccountRegistry(BrokerAccountDao dao, OkHttpClient http,
+                                 KrakenClient defaultClient, Set<String> ownerIds) {
         this.dao           = dao;
         this.http          = http;
         this.defaultClient = defaultClient;
+        this.ownerIds      = ownerIds == null ? Set.of() : Set.copyOf(ownerIds);
     }
 
     /**
-     * Returns the KrakenClient for the given Discord user.
-     * Uses a cached instance when available; builds from DB otherwise.
-     * Falls back to the global default client if no personal account is registered.
+     * Returns the KrakenClient for the given Discord user, or empty if they have no
+     * personal account registered and are not on the bot-owner allowlist.
      */
-    public KrakenClient resolve(String discordUserId) {
-        return cache.computeIfAbsent(discordUserId, uid -> {
-            Optional<BrokerAccountDao.BrokerAccount> acct = dao.getActive(uid, "KRAKEN");
-            if (acct.isEmpty()) return defaultClient;
+    public Optional<KrakenClient> resolve(String discordUserId) {
+        KrakenClient cached = cache.get(discordUserId);
+        if (cached != null) return Optional.of(cached);
+
+        Optional<BrokerAccountDao.BrokerAccount> acct = dao.getActive(discordUserId, "KRAKEN");
+        if (acct.isPresent()) {
             BrokerAccountDao.BrokerAccount a = acct.get();
-            return new KrakenClient(http, a.apiKey(), a.apiSecret());
-        });
+            KrakenClient personal = new KrakenClient(http, a.apiKey(), a.apiSecret());
+            cache.put(discordUserId, personal);
+            return Optional.of(personal);
+        }
+
+        if (ownerIds.contains(discordUserId)) {
+            cache.put(discordUserId, defaultClient);
+            return Optional.of(defaultClient);
+        }
+
+        return Optional.empty();
     }
 
     /** Adds or replaces a labeled account and evicts the cache entry so the next call rebuilds. */

@@ -96,9 +96,9 @@ public class DiscordListener {
                 String label  = rawParts[3].toLowerCase();
                 String apiKey = rawParts[4];
                 String secret = rawParts[5];
-                krakenRegistry.register(authorId, label, apiKey, secret);
-                // Delete the message immediately so the secret doesn't linger in chat history
+                // Delete the message first so the secret can't linger if registration throws.
                 message.delete("removing credential message").subscribe();
+                krakenRegistry.register(authorId, label, apiKey, secret);
                 yield ch.createMessage("✅ Kraken account **" + label + "** registered (your message was auto-deleted). Use `!account use kraken " + label + "` to activate it.");
             }
             case "USE" -> {
@@ -130,7 +130,9 @@ public class DiscordListener {
 
     private Mono<?> route(String content, MessageChannel ch, String authorId) {
 
-        KrakenClient kc = krakenRegistry.resolve(authorId);
+        // Empty when the user has no registered account and is not on the owner allowlist —
+        // commands that need Kraken access must refuse rather than silently use bot-owner creds.
+        KrakenClient kc = krakenRegistry.resolve(authorId).orElse(null);
 
         // ── !ANALYZE ────────────────────────────────────────────────────────────
         if (content.startsWith("!ANALYZE ")) {
@@ -278,7 +280,7 @@ public class DiscordListener {
         String[] parts = content.split("\\s+");
         if (parts.length < 2) return "Usage: !exit <SYMBOL> or !exit all";
         String arg = parts[1].toUpperCase();
-        if (kc == null) return "Kraken not configured.";
+        if (kc == null) return "❌ No Kraken account. Register one with `!account add kraken <label> <key> <secret>` in a DM.";
         if (arg.equals("ALL")) {
             Map<String, Double> positions = kc.getOpenPositions();
             if (positions.isEmpty()) return "No open positions found.";
