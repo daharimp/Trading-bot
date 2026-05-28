@@ -161,8 +161,8 @@ public class SignalScorer {
     }
 
     private Conviction convictionFor(double composite) {
-        if (composite >= 72) return Conviction.HIGH;
-        if (composite >= 55) return Conviction.MEDIUM;
+        if (composite >= 65) return Conviction.HIGH;   // auto-trade gate (aggressive)
+        if (composite >= 50) return Conviction.MEDIUM;
         return Conviction.LOW;
     }
 
