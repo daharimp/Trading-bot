@@ -193,7 +193,8 @@ public class WatchlistScheduler {
                         idea.getEntry(),
                         idea.getStopLoss(),
                         idea.getTarget(),
-                        qty);
+                        qty,
+                        idea.getConviction().name());
                 notifier.postMessage("🤖 **AUTO-PLAY** " + confirmation);
             } catch (Exception e) {
                 log.error("Auto-play order failed for {}: {}", ticker, e.getMessage());

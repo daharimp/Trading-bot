@@ -399,7 +399,8 @@ public class DiscordListener {
                 chosen.getEntry(),
                 chosen.getStopLoss(),
                 chosen.getTarget(),
-                qty);
+                qty,
+                chosen.getConviction().name());
     }
 
     private String parseAndPlaceOrder(String content) throws Exception {
@@ -428,7 +429,7 @@ public class DiscordListener {
         if (entry == 0 || stop == 0 || target == 0 || qty == 0)
             return "❌ Missing parameters. Usage: `!play AAPL LONG e=182.50 s=179 t=189 qty=10`";
 
-        return orderManager.placePlay(ticker, direction, entry, stop, target, qty);
+        return orderManager.placePlay(ticker, direction, entry, stop, target, qty, "MANUAL");
     }
 
     private boolean channelMatches(MessageChannel ch, String name) {
