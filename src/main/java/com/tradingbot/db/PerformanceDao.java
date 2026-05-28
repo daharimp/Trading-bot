@@ -25,11 +25,11 @@ public class PerformanceDao {
     /** Records the realized outcome of a closed position. outcome: WIN | LOSS | BREAKEVEN. */
     public void recordOutcome(Long orderId, String ticker, String direction,
                               double entryPrice, double exitPrice, int qty,
-                              double pnl, String outcome) {
+                              double pnl, String outcome, String conviction) {
         jdbi.useHandle(h -> h.createUpdate("""
                 INSERT INTO position_outcomes(order_id, ticker, direction, entry_price,
-                                              exit_price, qty, pnl, outcome)
-                VALUES(:orderId, :ticker, :dir, :entry, :exit, :qty, :pnl, :outcome)
+                                              exit_price, qty, pnl, outcome, conviction)
+                VALUES(:orderId, :ticker, :dir, :entry, :exit, :qty, :pnl, :outcome, :conviction)
                 """)
             .bind("orderId", orderId)
             .bind("ticker",  ticker.toUpperCase())
@@ -39,6 +39,7 @@ public class PerformanceDao {
             .bind("qty",     qty)
             .bind("pnl",     pnl)
             .bind("outcome", outcome.toUpperCase())
+            .bind("conviction", conviction == null ? null : conviction.toUpperCase())
             .execute());
     }
 
