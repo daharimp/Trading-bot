@@ -258,6 +258,52 @@ public class KrakenClient {
         } catch (Exception e) { log.error("Failed to cancel all Kraken orders", e); return 0; }
     }
 
+    /**
+     * Looks up the status of one or more Kraken order txids via the signed QueryOrders endpoint.
+     * Returns txid -> status ("open" | "closed" | "canceled" | "expired"). Missing/error txids
+     * are omitted. Note: a Kraken entry order shows "closed" once it FILLS (entry executed), not
+     * when stopped out — the attached stop-loss-close order has its own txid we don't hold, so
+     * stop-outs are inferred elsewhere from the position disappearing.
+     */
+    public java.util.Map<String, String> queryOrderStatuses(java.util.List<String> txids) {
+        java.util.Map<String, String> out = new java.util.LinkedHashMap<>();
+        if (!hasCredentials || txids == null || txids.isEmpty()) return out;
+        java.util.List<String> clean = new java.util.ArrayList<>();
+        for (String t : txids) if (t != null && !t.isBlank() && !t.equals("n/a")) clean.add(t);
+        if (clean.isEmpty()) return out;
+        try {
+            String nonce = String.valueOf(System.currentTimeMillis());
+            String postData = "nonce=" + nonce + "&txid=" + String.join(",", clean);
+            String signature = sign("/0/private/QueryOrders", nonce, postData);
+            RequestBody body = RequestBody.create(postData,
+                    okhttp3.MediaType.parse("application/x-www-form-urlencoded"));
+            Request req = new Request.Builder()
+                    .url(BASE + "/0/private/QueryOrders")
+                    .addHeader("API-Key", apiKey)
+                    .addHeader("API-Sign", signature)
+                    .post(body)
+                    .build();
+            try (Response resp = http.newCall(req).execute()) {
+                JsonObject root = JsonParser.parseString(resp.body().string()).getAsJsonObject();
+                JsonArray errors = root.getAsJsonArray("error");
+                if (errors != null && errors.size() > 0) {
+                    log.warn("Kraken QueryOrders error: {}", errors);
+                    return out;
+                }
+                JsonObject result = root.getAsJsonObject("result");
+                if (result == null) return out;
+                for (java.util.Map.Entry<String, JsonElement> e : result.entrySet()) {
+                    JsonObject o = e.getValue().getAsJsonObject();
+                    if (o.has("status")) out.put(e.getKey(), o.get("status").getAsString());
+                }
+                return out;
+            }
+        } catch (Exception e) {
+            log.error("Kraken QueryOrders failed", e);
+            return out;
+        }
+    }
+
     public String closePosition(String ticker) {
         if (!hasCredentials) return "No Kraken credentials configured.";
         try {

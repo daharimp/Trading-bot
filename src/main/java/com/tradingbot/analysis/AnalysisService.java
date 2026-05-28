@@ -37,7 +37,10 @@ public class AnalysisService {
     private final FundamentalAnalyst fundAnalyst;
     private final FundamentalDataClient fdClient;
     private final TradeIdeaGenerator rulesEngine;
+    private final SignalScorer scorer = new SignalScorer();
     private KrakenClient kraken;
+    private com.tradingbot.order.PositionSizer positionSizer;
+    private java.util.function.DoubleSupplier equitySupplier = () -> 0;
 
     public AnalysisService(AlpacaClient alpaca, TechnicalAnalyst techAnalyst,
                             FundamentalAnalyst fundAnalyst, FundamentalDataClient fdClient) {
@@ -51,6 +54,16 @@ public class AnalysisService {
     /** Injects the Kraken client for crypto bar pre-fetching. Call once after construction. */
     public void setKrakenClient(KrakenClient krakenClient) {
         this.kraken = krakenClient;
+    }
+
+    /**
+     * Enables risk-based position sizing. When set, each scored idea is annotated with a
+     * suggested quantity derived from current account equity and the trade's stop distance.
+     */
+    public void setRiskSizing(com.tradingbot.order.PositionSizer sizer,
+                              java.util.function.DoubleSupplier equitySupplier) {
+        this.positionSizer = sizer;
+        this.equitySupplier = equitySupplier;
     }
 
     /**
@@ -102,21 +115,42 @@ public class AnalysisService {
         CompletableFuture<List<TradeIdea>> techFuture = CompletableFuture.supplyAsync(
                 () -> techAnalyst.analyze(normalizedTicker, seriesMap, candidates));
 
-        CompletableFuture<String> fundFuture = CompletableFuture.supplyAsync(() -> {
-            if (crypto) return "ℹ️ Fundamental analysis not available for crypto assets.";
+        CompletableFuture<FundamentalAnalyst.FundamentalResult> fundFuture = CompletableFuture.supplyAsync(() -> {
+            if (crypto) {
+                return new FundamentalAnalyst.FundamentalResult(
+                        "ℹ️ Fundamental analysis not available for crypto assets.", Double.NaN);
+            }
             try {
                 FundamentalData fd = fdClient.fetch(normalizedTicker);
                 return fundAnalyst.analyze(normalizedTicker, fd);
             } catch (IOException e) {
                 log.warn("Fundamental data fetch failed for {}: {}", normalizedTicker, e.getMessage());
-                return "⚠️ Fundamental data unavailable: " + e.getMessage();
+                return new FundamentalAnalyst.FundamentalResult(
+                        "⚠️ Fundamental data unavailable: " + e.getMessage(), Double.NaN);
             }
         });
 
         List<TradeIdea> finalIdeas = techFuture.join();
-        String fundamentalSummary  = fundFuture.join();
+        FundamentalAnalyst.FundamentalResult fundResult = fundFuture.join();
 
-        String text = buildResponse(normalizedTicker, seriesMap, finalIdeas, fundamentalSummary);
+        // Step 4: Fuse technical + multi-timeframe + fundamental into a composite conviction,
+        // then order ideas best-first so the strongest setups surface at the top.
+        scorer.scoreAll(finalIdeas, seriesMap, fundResult.score());
+        finalIdeas = finalIdeas.stream()
+                .sorted((a, b) -> Double.compare(b.getCompositeScore(), a.getCompositeScore()))
+                .toList();
+
+        // Annotate each idea with a risk-sized suggested quantity (display + default for !pick).
+        if (positionSizer != null) {
+            double equity = equitySupplier.getAsDouble();
+            if (equity > 0) {
+                for (TradeIdea idea : finalIdeas) {
+                    idea.setSuggestedQty(positionSizer.sizeFor(idea, equity));
+                }
+            }
+        }
+
+        String text = buildResponse(normalizedTicker, seriesMap, finalIdeas, fundResult.summary());
         return new AnalysisResult(text, finalIdeas, seriesMap);
     }
 
@@ -159,6 +193,35 @@ public class AnalysisService {
     }
 
     /**
+     * Runs a no-look-ahead backtest of the rules engine for a single ticker/timeframe and
+     * returns a Discord-formatted performance summary. Defaults to the 1H timeframe.
+     */
+    public String runBacktest(String ticker, String timeframeArg) {
+        boolean crypto = AlpacaClient.isCrypto(ticker);
+        String normalizedTicker = crypto ? AlpacaClient.normalizeCryptoTicker(ticker) : ticker;
+
+        AlpacaClient.Timeframe tf = AlpacaClient.Timeframe.H1;
+        if (timeframeArg != null && !timeframeArg.isBlank()) {
+            for (AlpacaClient.Timeframe t : AlpacaClient.Timeframe.values()) {
+                if (t.displayName.equalsIgnoreCase(timeframeArg.trim())) { tf = t; break; }
+            }
+        }
+
+        try {
+            BarSeries series = crypto && kraken != null
+                    ? kraken.getBars(normalizedTicker, tf)
+                    : alpaca.getBars(normalizedTicker, tf);
+            if (series == null || series.getBarCount() < 60) {
+                return "❌ Not enough history to backtest **" + normalizedTicker + "** on " + tf.displayName + ".";
+            }
+            return new com.tradingbot.backtest.Backtester().run(normalizedTicker, tf, series).formatForDiscord();
+        } catch (Exception e) {
+            log.warn("Backtest failed for {} {}: {}", normalizedTicker, tf.displayName, e.getMessage());
+            return "❌ Backtest failed: " + e.getMessage();
+        }
+    }
+
+    /**
      * Builds the numbered pick menu shown after analysis.
      * Returns empty string if there are no ideas.
      */
@@ -173,13 +236,19 @@ public class AnalysisService {
                 case MEDIUM -> "⚡ MEDIUM";
                 case LOW    -> "💤 LOW";
             };
-            sb.append(String.format("%s  **%s** %s | Entry $%.2f | Stop $%.2f | Target $%.2f | R:R %.1f | %s\n",
+            String scorePart = idea.isScored()
+                    ? String.format(" | Score %.0f %s", idea.getCompositeScore(), "⭐".repeat(idea.getStars()))
+                    : "";
+            String qtyPart = idea.getSuggestedQty() > 0
+                    ? String.format(" | Qty %d", idea.getSuggestedQty())
+                    : "";
+            sb.append(String.format("%s  **%s** %s | Entry $%.2f | Stop $%.2f | Target $%.2f | R:R %.1f | %s%s%s\n",
                     NUMBER_EMOJIS[i],
                     idea.getDirection(), idea.getTimeframe(),
                     idea.getEntry(), idea.getStopLoss(), idea.getTarget(),
-                    idea.getRiskRewardRatio(), conviction));
+                    idea.getRiskRewardRatio(), conviction, scorePart, qtyPart));
         }
-        sb.append("\nReply `!pick N qty=10` to place as a bracket order.");
+        sb.append("\nReply `!pick N` to use the risk-sized qty, or `!pick N qty=10` to override.");
         return sb.toString();
     }
 

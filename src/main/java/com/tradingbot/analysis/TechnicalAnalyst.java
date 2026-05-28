@@ -71,6 +71,13 @@ public class TechnicalAnalyst {
     private final String openRouterKey;
     private final String model;
 
+    // Optional: supplies a realized-performance prompt fragment (empty until outcomes accrue).
+    private java.util.function.Supplier<String> performanceContext = () -> "";
+
+    public void setPerformanceContext(java.util.function.Supplier<String> supplier) {
+        this.performanceContext = supplier != null ? supplier : () -> "";
+    }
+
     // True when the model string looks like an OpenRouter model (contains "/")
     private final boolean useOpenRouter;
 
@@ -200,6 +207,12 @@ public class TechnicalAnalyst {
 
         StringBuilder sb = new StringBuilder();
         sb.append("## Ticker: ").append(ticker).append("\n\n");
+
+        String perf = performanceContext.get();
+        if (perf != null && !perf.isBlank()) {
+            sb.append(perf);
+        }
+
         sb.append("### Indicator Snapshot by Timeframe\n\n");
 
         for (AlpacaClient.Timeframe tf : AlpacaClient.Timeframe.values()) {
@@ -211,15 +224,30 @@ public class TechnicalAnalyst {
             sb.append(String.format("  Price: $%.2f\n", eng.currentPrice()));
             sb.append(String.format("  EMA9: %.2f | EMA21: %.2f | EMA50: %.2f\n",
                     eng.ema9(), eng.ema21(), eng.ema50()));
-            sb.append(String.format("  RSI(14): %.1f\n", eng.rsi()));
+            sb.append(String.format("  RSI(14): %.1f | Stoch %%K: %.1f %%D: %.1f\n",
+                    eng.rsi(), eng.stochK(), eng.stochD()));
+            sb.append(String.format("  MACD: %.3f | signal: %.3f | hist: %.3f\n",
+                    eng.macd(), eng.macdSignal(), eng.macdHistogram()));
             sb.append(String.format("  ATR(14): %.2f (%.1f%% of price)\n",
                     eng.atr(), (eng.atr() / eng.currentPrice()) * 100));
-            sb.append(String.format("  Volume: %.0f | 20-bar avg: %.0f | Ratio: %.2fx\n",
+            sb.append(String.format("  Bollinger: upper %.2f | mid %.2f | lower %.2f | %%B %.2f | bandwidth %.3f%s\n",
+                    eng.bbUpper(), eng.bbMiddle(), eng.bbLower(), eng.bbPercentB(), eng.bbBandwidth(),
+                    eng.isBollingerSqueeze(50) ? " (SQUEEZE)" : ""));
+            sb.append(String.format("  ADX: %.1f (%s) | +DI %.1f | -DI %.1f\n",
+                    eng.adx(), eng.isTrending() ? "trending" : "ranging", eng.plusDI(), eng.minusDI()));
+            sb.append(String.format("  Volume: %.0f | 20-bar avg: %.0f | Ratio: %.2fx | OBV slope(10): %s\n",
                     eng.currentVolume(), eng.avgVolume20(),
-                    eng.avgVolume20() > 0 ? eng.currentVolume() / eng.avgVolume20() : 0));
-            sb.append(String.format("  EMA stack: %s\n",
+                    eng.avgVolume20() > 0 ? eng.currentVolume() / eng.avgVolume20() : 0,
+                    eng.obvSlope(10) > 0 ? "rising" : "falling"));
+            sb.append(String.format("  VWAP: %.2f (price %s VWAP)\n",
+                    eng.vwap(), eng.currentPrice() >= eng.vwap() ? "above" : "below"));
+            sb.append(String.format("  EMA stack: %s | Structure: %s\n",
                     eng.isBullishEmaStack() ? "BULLISH (9>21>50)"
-                    : eng.isBearishEmaStack() ? "BEARISH (9<21<50)" : "MIXED"));
+                    : eng.isBearishEmaStack() ? "BEARISH (9<21<50)" : "MIXED",
+                    eng.marketStructure(20)));
+            String div = eng.bullishRsiDivergence(20) ? "BULLISH RSI divergence"
+                    : eng.bearishRsiDivergence(20) ? "BEARISH RSI divergence" : "none";
+            sb.append(String.format("  Divergence: %s\n", div));
             sb.append(String.format("  20-bar swing high: %.2f | low: %.2f\n\n",
                     eng.swingHigh(20), eng.swingLow(20)));
         }

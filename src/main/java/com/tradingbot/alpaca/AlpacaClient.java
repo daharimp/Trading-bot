@@ -401,6 +401,37 @@ public class AlpacaClient {
         }
     }
 
+    /** Which leg of a bracket closed the position. NONE = still open / entry unfilled. */
+    public enum CloseLeg { NONE, STOP, TARGET }
+
+    /**
+     * Inspects a bracket order's child legs (nested) and reports whether the stop-loss or
+     * take-profit leg has filled. Returns NONE if neither has filled yet.
+     */
+    public CloseLeg getBracketCloseLeg(String orderId) throws IOException {
+        String url = tradingBaseUrl + "/v2/orders/" + orderId + "?nested=true";
+        Request request = new Request.Builder()
+                .url(url)
+                .addHeader("APCA-API-KEY-ID", apiKey)
+                .addHeader("APCA-API-SECRET-KEY", apiSecret)
+                .build();
+        try (Response response = http.newCall(request).execute()) {
+            if (!response.isSuccessful()) return CloseLeg.NONE;
+            JsonObject parent = JsonParser.parseString(response.body().string()).getAsJsonObject();
+            if (!parent.has("legs") || parent.get("legs").isJsonNull()) return CloseLeg.NONE;
+            for (JsonElement el : parent.getAsJsonArray("legs")) {
+                JsonObject leg = el.getAsJsonObject();
+                String status = leg.has("status") ? leg.get("status").getAsString() : "";
+                if (!"filled".equals(status)) continue;
+                String type = leg.has("type") ? leg.get("type").getAsString() : "";
+                // Take-profit legs are limit orders; stop-loss legs are stop / stop_limit.
+                if (type.contains("stop")) return CloseLeg.STOP;
+                if (type.contains("limit")) return CloseLeg.TARGET;
+            }
+            return CloseLeg.NONE;
+        }
+    }
+
     /**
      * Cancels a pending order by ID.
      */

@@ -63,7 +63,7 @@ public class OrderManager {
      * Returns a Discord-formatted confirmation string.
      */
     public String placePlay(String ticker, String direction, double entry,
-                             double stop, double target, int qty) throws Exception {
+                             double stop, double target, int qty, String conviction) throws Exception {
         if (accountMonitor != null && accountMonitor.isPaused()) {
             return "⛔ Bot is paused — account below minimum equity. Use !resume to re-enable.";
         }
@@ -100,12 +100,12 @@ public class OrderManager {
                 String.format("%.2f", target));
 
         if (AlpacaClient.isCrypto(ticker)) {
-            return placeCryptoPlay(ticker, direction, entry, stop, target, qty, rr);
+            return placeCryptoPlay(ticker, direction, entry, stop, target, qty, rr, conviction);
         }
 
         String orderId = alpaca.placeOrder(ticker, side, entry, stop, target, qty);
         slippageTracker.record(orderId, ticker, side, entry);
-        orderDao.recordAlpacaOrder(ticker, direction, entry, stop, target, qty, orderId, "day");
+        orderDao.recordAlpacaOrder(ticker, direction, entry, stop, target, qty, orderId, "day", conviction);
         dailyTradeCount.incrementAndGet();
 
         return String.format("""
@@ -130,7 +130,7 @@ public class OrderManager {
      * Crypto does not support OPG — falls back to a GTC Kraken bracket.
      */
     public String placePlayOpg(String ticker, String direction, double entry,
-                                double stop, double target, int qty) throws Exception {
+                                double stop, double target, int qty, String conviction) throws Exception {
         if (accountMonitor != null && accountMonitor.isPaused()) {
             return "⛔ Bot is paused — account below minimum equity. Use !resume to re-enable.";
         }
@@ -165,12 +165,12 @@ public class OrderManager {
                 String.format("%.2f", target));
 
         if (AlpacaClient.isCrypto(ticker)) {
-            return placeCryptoPlay(ticker, direction, entry, stop, target, qty, rr);
+            return placeCryptoPlay(ticker, direction, entry, stop, target, qty, rr, conviction);
         }
 
         String orderId = alpaca.placeOrder(ticker, side, entry, stop, target, qty, "opg");
         slippageTracker.record(orderId, ticker, side, entry);
-        orderDao.recordAlpacaOrder(ticker, direction, entry, stop, target, qty, orderId, "opg");
+        orderDao.recordAlpacaOrder(ticker, direction, entry, stop, target, qty, orderId, "opg", conviction);
         dailyTradeCount.incrementAndGet();
 
         return String.format("""
@@ -190,7 +190,8 @@ public class OrderManager {
 
     /** Routes a crypto bracket order to Kraken and formats the Discord confirmation. */
     private String placeCryptoPlay(String ticker, String direction, double entry,
-                                    double stop, double target, int qty, double rr) throws Exception {
+                                    double stop, double target, int qty, double rr,
+                                    String conviction) throws Exception {
         if (kraken == null) {
             return "❌ Kraken client not configured — cannot place crypto orders. Set `KRAKEN_API_KEY` and `KRAKEN_API_SECRET` in `.env`.";
         }
@@ -201,7 +202,7 @@ public class OrderManager {
         String tpTxid    = parts.length > 1 ? parts[1] : "n/a";
 
         slippageTracker.record(entryTxid, ticker, direction.equalsIgnoreCase("LONG") ? "buy" : "sell", entry);
-        orderDao.recordKrakenOrder(ticker, direction, entry, stop, target, qty, entryTxid, tpTxid);
+        orderDao.recordKrakenOrder(ticker, direction, entry, stop, target, qty, entryTxid, tpTxid, conviction);
         dailyTradeCount.incrementAndGet();
 
         return String.format("""

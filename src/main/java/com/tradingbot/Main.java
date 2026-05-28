@@ -53,22 +53,34 @@ public class Main {
         String krakenKey        = env.get("KRAKEN_API_KEY", "");
         String krakenSecret     = env.get("KRAKEN_API_SECRET", "");
         String dbPath           = env.get("DB_PATH", "./trading-bot.db");
+        // Comma-separated Discord user IDs allowed to use the default (bot-owner) Kraken creds
+        // when they have no personal account registered. Other users get an empty resolve()
+        // result and the command refuses. See KrakenAccountRegistry.
+        java.util.Set<String> botOwnerIds = java.util.Arrays.stream(
+                env.get("BOT_OWNER_DISCORD_IDS", "").split(","))
+                .map(String::trim)
+                .filter(s -> !s.isEmpty())
+                .collect(java.util.stream.Collectors.toUnmodifiableSet());
         int maxDailyTrades      = Integer.parseInt(env.get("MAX_DAILY_TRADES", "15"));
         double minEquityUsd     = Double.parseDouble(env.get("MIN_EQUITY_USD", "500"));
+        double riskPerTradePct  = Double.parseDouble(env.get("RISK_PER_TRADE_PCT", "1.0"));
+        double maxPortfolioRisk = Double.parseDouble(env.get("MAX_PORTFOLIO_RISK_PCT", "5.0"));
 
         DatabaseManager db        = new DatabaseManager(dbPath);
         WatchlistDao watchlistDao = new WatchlistDao(db.jdbi());
         SessionDao   sessionDao   = new SessionDao(db.jdbi());
         OrderDao     orderDao     = new OrderDao(db.jdbi());
         BrokerAccountDao brokerAccountDao = new BrokerAccountDao(db.jdbi());
+        com.tradingbot.db.PerformanceDao performanceDao = new com.tradingbot.db.PerformanceDao(db.jdbi());
 
         OkHttpClient httpClient       = new OkHttpClient();
         AlpacaClient alpaca           = new AlpacaClient(alpacaKey, alpacaSecret, alpacaMode);
         KrakenClient kraken           = new KrakenClient(httpClient, krakenKey, krakenSecret);
-        KrakenAccountRegistry krakenRegistry = new KrakenAccountRegistry(brokerAccountDao, httpClient, kraken);
+        KrakenAccountRegistry krakenRegistry = new KrakenAccountRegistry(brokerAccountDao, httpClient, kraken, botOwnerIds);
         alpaca.setKrakenClient(kraken);
         FundamentalDataClient fdClient = new FundamentalDataClient(alphaVantageKey);
         TechnicalAnalyst techAnalyst  = new TechnicalAnalyst(anthropicKey, openRouterKey, technicalModel);
+        techAnalyst.setPerformanceContext(performanceDao::performanceContext);
         FundamentalAnalyst fundAnalyst = new FundamentalAnalyst(openRouterKey, fundamentalModel);
         AnalysisService analysisService = new AnalysisService(alpaca, techAnalyst, fundAnalyst, fdClient);
         analysisService.setKrakenClient(kraken);
@@ -79,6 +91,14 @@ public class Main {
 
         AccountMonitor accountMonitor = new AccountMonitor(kraken, minEquityUsd);
         orderManager.setAccountMonitor(accountMonitor);
+
+        com.tradingbot.order.PositionSizer positionSizer =
+                new com.tradingbot.order.PositionSizer(riskPerTradePct, maxPortfolioRisk);
+        analysisService.setRiskSizing(positionSizer, accountMonitor::getTotalUsdValue);
+
+        com.tradingbot.order.OutcomeTracker outcomeTracker =
+                new com.tradingbot.order.OutcomeTracker(alpaca, kraken, orderDao, performanceDao);
+        outcomeTracker.start();
 
         ChartRenderer chartRenderer   = new ChartRenderer();
 
@@ -127,6 +147,7 @@ public class Main {
 
         scheduler.shutdown();
         slippageTracker.shutdown();
+        outcomeTracker.shutdown();
         db.close();
     }
 
